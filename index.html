@@ -869,9 +869,14 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
           analysis.prints.forEach((print) => {
             const day = parseIsoDateInMonth(print.date_found, state.month, state.year);
             if (day === null) {
-              const dateInfo = print.date_found
-                ? `data extraída (${print.date_found}) fora do mês/ano selecionado`
-                : 'nenhuma data legível encontrada no print';
+              let dateInfo;
+              if (print.date_found) {
+                dateInfo = `data extraída (${print.date_found}) fora do mês/ano selecionado`;
+              } else if (print.date_warning) {
+                dateInfo = print.date_warning;
+              } else {
+                dateInfo = 'nenhuma data legível encontrada no print';
+              }
               siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: ${dateInfo}. ${print.notes || ''}`.trim());
               return;
             }
@@ -895,7 +900,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
               state.progress.total++;
               requeued = true;
             } else {
-              siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: limite de taxa da OpenAI persistente após ${attempts} tentativas.`);
+              siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: limite de taxa da API persistente após ${attempts} tentativas.`);
             }
           } else {
             siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: ${err.message}`);
@@ -910,6 +915,20 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
           renderAllSiteCards();
         }
       });
+
+      // Sem isto, um dia vermelho não tem explicação alguma no log: ou o PDF nunca
+      // trouxe aquele dia, ou a data do print correspondente foi lida errada.
+      const totalDays = daysInSelectedMonth();
+      state.results.forEach((siteResult) => {
+        const missing = [];
+        for (let d = 1; d <= totalDays; d++) {
+          if (!siteResult.days.has(d)) missing.push(d);
+        }
+        if (missing.length) {
+          siteResult.extraNotes.push(`Dias sem nenhum print correspondente: ${missing.join(', ')}. Verifique se o PDF realmente não os cobre ou se a data de algum print foi lida errada.`);
+        }
+      });
+      renderAllSiteCards();
     } finally {
       state.isRunning = false;
       el.runBtn.disabled = false;

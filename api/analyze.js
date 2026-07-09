@@ -35,8 +35,10 @@ Para CADA print distinto que você identificar na imagem da página, responda:
   escrita (ex: "18/06/2026"). DICA IMPORTANTE: em capturas de desktop
   Windows, o relógio fica no CANTO INFERIOR DIREITO da barra de tarefas,
   com a hora em cima e a data logo abaixo (ex: "11:55" sobre "18/06/2026").
-  Examine esse canto com atenção máxima antes de responder. Use null apenas
-  se realmente não houver relógio/timestamp legível no print.
+  Examine esse canto com atenção máxima antes de responder. Transcreva a data
+  COMPLETA, incluindo o ano com os quatro dígitos — nunca a trunque para
+  "11/06". Não inclua a hora neste campo. Use null apenas se realmente não
+  houver relógio/timestamp legível no print.
 - article_date_text: a transcrição LITERAL da data de publicação da matéria
   mais recente visível dentro do print — byline, "publicado em", data junto
   ao título, ou data no caminho da URL da barra de endereços (ex:
@@ -144,61 +146,74 @@ function parseModelJson(rawText) {
   return parsed;
 }
 
-// Converte a transcrição literal da data (date_text) para ISO em código, no formato
-// brasileiro DD/MM. O modelo às vezes lê a data certa mas erra a conversão no campo
-// estruturado (ex: "01/06/2026" virando "2026-01-01") — aqui a conversão é determinística
-// e sobrepõe o date_found do modelo sempre que a transcrição for parseável.
-function dateTextToIso(dateText) {
+function isoOrNull(year, month, day) {
+  if (!(day >= 1 && day <= 31) || !(month >= 1 && month <= 12)) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+// Converte a transcrição literal da data para ISO em código. O modelo lê os dígitos bem,
+// mas erra a conversão estruturada (ex: "01/06/2026" virando "2026-01-01") e às vezes
+// trunca o ano ("11/06"), então a conversão é feita aqui, de forma determinística.
+// fallbackYear (o ano auditado) só é usado quando a transcrição não traz ano nenhum.
+function dateTextToIso(dateText, fallbackYear) {
   if (!dateText) return null;
   const t = String(dateText).trim().toLowerCase();
 
   // formato de URL/ISO com ano na frente: 2026/06/02, 2026-06-02
   let m = /(\d{4})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})/.exec(t);
-  if (m) {
-    const year = Number(m[1]);
-    const month = Number(m[2]);
-    const day = Number(m[3]);
-    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    }
-    return null;
-  }
+  if (m) return isoOrNull(Number(m[1]), Number(m[2]), Number(m[3]));
 
-  // formato brasileiro DD/MM/AAAA
+  // formato brasileiro DD/MM/AAAA (com hora opcional depois)
   m = /(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{2,4})/.exec(t);
   if (m) {
-    const day = Number(m[1]);
-    const month = Number(m[2]);
     let year = Number(m[3]);
     if (year < 100) year += 2000;
-    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    }
-    return null;
+    return isoOrNull(year, Number(m[2]), Number(m[1]));
   }
 
   // formato por extenso: "1 de junho de 2026", "1º de junho 2026"
   m = /(\d{1,2})\s*(?:º\s*)?de\s+([a-zç]+)(?:\s+de)?\s+(\d{4})/.exec(t);
   if (m) {
-    const day = Number(m[1]);
     const month = MONTH_NAMES_PT.indexOf(m[2]) + 1;
-    const year = Number(m[3]);
-    if (month >= 1 && day >= 1 && day <= 31) {
-      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    }
+    return isoOrNull(Number(m[3]), month, Number(m[1]));
+  }
+
+  // DD/MM sem ano — o relógio do Windows às vezes é transcrito truncado ("11/06").
+  // Só reparável se soubermos o ano auditado. O separador exclui horas ("11:52").
+  if (fallbackYear) {
+    m = /(?:^|\D)(\d{1,2})\s*[\/\-.]\s*(\d{1,2})(?!\s*[\/\-.]\s*\d)/.exec(t);
+    if (m) return isoOrNull(fallbackYear, Number(m[2]), Number(m[1]));
   }
   return null;
 }
 
 // A prioridade de evidências é aplicada AQUI, em código, e não pelo modelo:
-// relógio do sistema vence sempre que existir; data de matéria é fallback.
-// (Mantém compatibilidade com o campo legado date_text/date_found.)
-function normalizePrintDates(parsed) {
+// o relógio do sistema vence sempre que existir; a data de matéria é fallback.
+// Quando o relógio existe mas não é conversível, NÃO caímos na data da matéria: ela
+// costuma ser de notícia antiga ainda na página, e produziria um dia verde errado.
+// Preferimos marcar a página para revisão humana (date_found null + date_warning).
+function normalizePrintDates(parsed, period) {
+  const fallbackYear = period ? period.year : null;
   parsed.prints.forEach((print) => {
-    const fromClock = dateTextToIso(print.clock_date_text);
-    const fromArticle = dateTextToIso(print.article_date_text);
-    const fromLegacyText = dateTextToIso(print.date_text);
-    print.date_found = fromClock || fromArticle || fromLegacyText || print.date_found || null;
+    const fromClock = dateTextToIso(print.clock_date_text, fallbackYear);
+    if (fromClock) {
+      print.date_found = fromClock;
+      print.date_source = 'relógio do sistema';
+      return;
+    }
+    if (print.clock_date_text) {
+      print.date_found = null;
+      print.date_warning = `relógio do sistema detectado ("${print.clock_date_text}") mas ilegível/incompleto`;
+      return;
+    }
+    const fromArticle = dateTextToIso(print.article_date_text, fallbackYear);
+    if (fromArticle) {
+      print.date_found = fromArticle;
+      print.date_source = 'data da matéria';
+      return;
+    }
+    print.date_found = dateTextToIso(print.date_text, fallbackYear) || null;
+    if (print.date_found) print.date_source = 'data no print';
   });
   return parsed;
 }
@@ -293,7 +308,7 @@ module.exports = async function handler(req, res) {
     const upstreamRes = await callAnthropicWithRetry(apiKey, body, startedAt);
     const data = await upstreamRes.json();
     const rawText = (data.content || []).map((block) => block.text || '').join('');
-    const parsed = normalizePrintDates(parseModelJson(rawText));
+    const parsed = normalizePrintDates(parseModelJson(rawText), validPeriod);
     res.status(200).json(parsed);
   } catch (err) {
     if (err instanceof UpstreamAuthError) {
