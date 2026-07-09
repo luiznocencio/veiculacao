@@ -391,6 +391,31 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   ];
 
   class ApiKeyError extends Error {}
+  class RateLimitError extends Error {
+    constructor(message, retryAfterMs) {
+      super(message);
+      this.retryAfterMs = retryAfterMs;
+    }
+  }
+
+  const MAX_TASK_RETRIES = 4; // reenfileiramentos por página antes de desistir de vez
+  const rateLimitGate = { cooldownUntil: 0 };
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function waitForCooldown() {
+    const now = Date.now();
+    if (rateLimitGate.cooldownUntil > now) {
+      await sleep(rateLimitGate.cooldownUntil - now);
+    }
+  }
+
+  function noteRateLimited(retryAfterMs) {
+    const wait = Math.min(Math.max(Number(retryAfterMs) || 2000, 1000), 60000);
+    rateLimitGate.cooldownUntil = Math.max(rateLimitGate.cooldownUntil, Date.now() + wait);
+  }
 
   // ---------- Elements ----------
   const el = {
@@ -674,6 +699,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
       const body = await res.json().catch(() => ({}));
       throw new ApiKeyError(body.message || 'Chave de API inválida ou sem créditos no servidor.');
     }
+    if (res.status === 429) {
+      const body = await res.json().catch(() => ({}));
+      throw new RateLimitError(body.message || 'Limite de taxa da OpenAI atingido.', body.retryAfterMs);
+    }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.message || `Erro ao consultar o servidor (status ${res.status}).`);
@@ -816,8 +845,11 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 
       await processQueue(tasks, 4, async (task) => {
         if (stoppedForApiKey) return;
+        await waitForCooldown();
+
         const { siteIndex, pageImage } = task;
         const siteResult = state.results[siteIndex];
+        let requeued = false;
         try {
           const analysis = await analyzePage(pageImage, state.refs);
           if (analysis.prints.length === 0) {
@@ -838,12 +870,24 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
           if (err instanceof ApiKeyError) {
             stoppedForApiKey = true;
             showApiErrorBanner(err.message);
+          } else if (err instanceof RateLimitError) {
+            noteRateLimited(err.retryAfterMs);
+            const attempts = (task.attempts || 0) + 1;
+            if (attempts <= MAX_TASK_RETRIES) {
+              tasks.push({ siteIndex, pageImage, attempts });
+              state.progress.total++;
+              requeued = true;
+            } else {
+              siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: limite de taxa da OpenAI persistente após ${attempts} tentativas.`);
+            }
           } else {
             siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: ${err.message}`);
           }
         } finally {
-          pagesRemaining[siteIndex]--;
-          if (pagesRemaining[siteIndex] === 0) siteResult.complete = true;
+          if (!requeued) {
+            pagesRemaining[siteIndex]--;
+            if (pagesRemaining[siteIndex] === 0) siteResult.complete = true;
+          }
           state.progress.done++;
           updateProgressBar();
           renderAllSiteCards();
