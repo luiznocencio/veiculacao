@@ -24,6 +24,10 @@ Para CADA print distinto que você identificar na imagem da página, responda:
   visivelmente no print, false caso contrário.
 - date_found: a data visível no print, no formato estrito YYYY-MM-DD.
   Se não houver nenhuma data legível no print, use null.
+  IMPORTANTE: as datas nos prints estão no formato brasileiro DD/MM/AAAA
+  (dia/mês/ano). Ao converter para YYYY-MM-DD, interprete SEMPRE o primeiro
+  número como dia e o segundo como mês, nunca o contrário.
+  Exemplo: "05/06/2026" é 5 de junho de 2026 → "2026-06-05".
 - notes: uma frase curta em português explicando o que foi observado.
 
 Responda APENAS com um JSON válido, sem markdown, sem texto extra,

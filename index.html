@@ -858,7 +858,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
           analysis.prints.forEach((print) => {
             const day = parseIsoDateInMonth(print.date_found, state.month, state.year);
             if (day === null) {
-              siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: print sem data reconhecível no mês selecionado. ${print.notes || ''}`.trim());
+              const dateInfo = print.date_found
+                ? `data extraída (${print.date_found}) fora do mês/ano selecionado`
+                : 'nenhuma data legível encontrada no print';
+              siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: ${dateInfo}. ${print.notes || ''}`.trim());
               return;
             }
             const newStatus = print.banner_found ? 'ok' : 'problem';
