@@ -30,8 +30,10 @@ veiculação — considere apenas o que está DENTRO do screenshot do site.
 Para CADA print distinto que você identificar na imagem da página, responda:
 - banner_found: true se a arte do banner na imagem de referência aparece
   visivelmente no print, false caso contrário.
-- date_found: a data que comprova o dia da captura, no formato estrito
-  YYYY-MM-DD, seguindo esta ordem de prioridade de evidências (todas
+- date_text: a transcrição LITERAL da data que comprova o dia da captura,
+  exatamente como ela aparece escrita no print (ex: "01/06/2026" ou
+  "1 de junho de 2026"). NÃO converta, NÃO reformate — apenas copie os
+  caracteres que você enxerga. Ordem de prioridade de evidências (todas
   avaliadas somente DENTRO do screenshot do site, nunca no timbrado):
   1. Relógio do sistema ou timestamp de captura visível dentro do print —
      se existir, use SEMPRE essa data, mesmo que haja outras datas na página.
@@ -41,21 +43,22 @@ Para CADA print distinto que você identificar na imagem da página, responda:
      MAIS RECENTE — matérias antigas permanecem na página por dias.
   3. Se não houver nenhuma das duas dentro do print, use null — mesmo que
      o timbrado ao redor tenha uma data.
-  IMPORTANTE: as datas nos prints estão no formato brasileiro DD/MM/AAAA
-  (dia/mês/ano). Ao converter para YYYY-MM-DD, interprete SEMPRE o primeiro
-  número como dia e o segundo como mês, nunca o contrário.
-  Exemplo: "05/06/2026" é 5 de junho de 2026 → "2026-06-05".
-  Leia os dígitos do ano com atenção redobrada. Se o ano estiver borrado ou
-  pequeno demais para leitura segura, use null em vez de arriscar — uma data
+  Leia os dígitos com atenção redobrada. Se a data estiver borrada ou
+  pequena demais para leitura segura, use null em vez de arriscar — uma data
   confiantemente errada é pior para a auditoria do que uma pendência de
   revisão humana.
+- date_found: date_text convertida para o formato estrito YYYY-MM-DD.
+  As datas numéricas nos prints estão no formato brasileiro DD/MM/AAAA
+  (dia/mês/ano): o primeiro número é SEMPRE o dia, o segundo é SEMPRE o mês.
+  Exemplo: date_text "05/06/2026" → date_found "2026-06-05" (5 de junho).
+  Se date_text for null, date_found também é null.
 - notes: uma frase curta em português explicando o que foi observado,
   mencionando qual evidência de data foi usada (relógio do sistema ou
   data de matéria) e, se uma data de timbrado foi ignorada, mencione isso.
 
 Responda APENAS com um JSON válido, sem markdown, sem texto extra,
 no formato exato:
-{"prints":[{"banner_found":true,"date_found":"2026-07-03","notes":"..."}]}
+{"prints":[{"banner_found":true,"date_text":"03/07/2026","date_found":"2026-07-03","notes":"..."}]}
 
 Se a página não tiver nenhum print reconhecível, responda {"prints":[]}.`;
 
@@ -140,6 +143,46 @@ function parseModelJson(rawText) {
   if (start === -1 || end === -1) throw new Error('Resposta sem JSON reconhecível');
   const parsed = JSON.parse(text.slice(start, end + 1));
   if (!Array.isArray(parsed.prints)) throw new Error('Campo "prints" ausente ou inválido');
+  return parsed;
+}
+
+// Converte a transcrição literal da data (date_text) para ISO em código, no formato
+// brasileiro DD/MM. O modelo às vezes lê a data certa mas erra a conversão no campo
+// estruturado (ex: "01/06/2026" virando "2026-01-01") — aqui a conversão é determinística
+// e sobrepõe o date_found do modelo sempre que a transcrição for parseável.
+function dateTextToIso(dateText) {
+  if (!dateText) return null;
+  const t = String(dateText).trim().toLowerCase();
+
+  let m = /(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{2,4})/.exec(t);
+  if (m) {
+    const day = Number(m[1]);
+    const month = Number(m[2]);
+    let year = Number(m[3]);
+    if (year < 100) year += 2000;
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+    return null;
+  }
+
+  m = /(\d{1,2})\s*(?:º\s*)?de\s+([a-zç]+)(?:\s+de)?\s+(\d{4})/.exec(t);
+  if (m) {
+    const day = Number(m[1]);
+    const month = MONTH_NAMES_PT.indexOf(m[2]) + 1;
+    const year = Number(m[3]);
+    if (month >= 1 && day >= 1 && day <= 31) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+  return null;
+}
+
+function normalizePrintDates(parsed) {
+  parsed.prints.forEach((print) => {
+    const isoFromText = dateTextToIso(print.date_text);
+    if (isoFromText) print.date_found = isoFromText;
+  });
   return parsed;
 }
 
@@ -233,7 +276,7 @@ module.exports = async function handler(req, res) {
     const upstreamRes = await callAnthropicWithRetry(apiKey, body, startedAt);
     const data = await upstreamRes.json();
     const rawText = (data.content || []).map((block) => block.text || '').join('');
-    const parsed = parseModelJson(rawText);
+    const parsed = normalizePrintDates(parseModelJson(rawText));
     res.status(200).json(parsed);
   } catch (err) {
     if (err instanceof UpstreamAuthError) {
