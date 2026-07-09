@@ -2,3 +2,9 @@
 node_modules/
 .env
 .env.local
+
+# material real de clientes/veiculos usado em testes locais - nunca versionar
+testes/
+*.jpg
+*.png
+*.pdf
