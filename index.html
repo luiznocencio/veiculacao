@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verificador de Veiculação de Banners</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #12151A;
+    --panel: #1B1F27;
+    --panel-2: #20242E;
+    --line: #2A2F3A;
+    --text: #E7E9EE;
+    --text-dim: #8B93A3;
+    --accent: #4C8DFF;
+    --ok: #3DD68C;
+    --ok-bg: rgba(61,214,140,.12);
+    --warn: #F5A623;
+    --warn-bg: rgba(245,166,35,.12);
+    --bad: #FF5C6C;
+    --bad-bg: rgba(255,92,108,.12);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Sans', sans-serif;
+    line-height: 1.5;
+  }
+  code, .mono, input, select, .badge, .day-cell, .progress-label {
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  header {
+    padding: 28px 32px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 {
+    margin: 0 0 6px;
+    font-size: 22px;
+    font-weight: 600;
+  }
+  header p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px 32px 64px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+  .panel h2 {
+    margin: 0 0 16px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .field {
+    margin-bottom: 18px;
+  }
+  .field label {
+    display: block;
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .row .field {
+    flex: 1;
+    min-width: 160px;
+  }
+  input[type="text"], select {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  input:focus, select:focus { outline: 1px solid var(--accent); }
+  .btn {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    padding: 9px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+    padding: 11px 20px;
+  }
+  .btn-primary:disabled {
+    opacity: .5;
+    cursor: not-allowed;
+  }
+  .status-msg {
+    font-size: 12px;
+    margin-top: 6px;
+    color: var(--text-dim);
+  }
+  .status-msg.error { color: var(--bad); }
+  .status-msg.success { color: var(--ok); }
+  .upload-zone {
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    padding: 14px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 13px;
+    cursor: pointer;
+    position: relative;
+  }
+  .upload-zone:hover, .upload-zone.dragover { border-color: var(--accent); color: var(--text); }
+  .upload-zone input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .chiplist {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 6px 8px 6px 6px;
+    font-size: 12px;
+  }
+  .chip img {
+    width: 24px;
+    height: 24px;
+    object-fit: cover;
+    border-radius: 4px;
+  }
+  .chip .doc-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    background: var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+  }
+  .chip .name {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chip .remove {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1;
+    padding: 2px;
+  }
+  .chip .remove:hover { color: var(--bad); }
+  .run-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 20px;
+  }
+  .progress-wrap {
+    flex: 1;
+    display: none;
+  }
+  .progress-wrap.visible { display: block; }
+  .progress-label {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .progress-bar-bg {
+    background: var(--panel-2);
+    border-radius: 6px;
+    height: 8px;
+    overflow: hidden;
+  }
+  .progress-bar-fill {
+    background: var(--accent);
+    height: 100%;
+    width: 0%;
+    transition: width .2s ease;
+  }
+  .banner-error {
+    background: var(--bad-bg);
+    border: 1px solid var(--bad);
+    color: var(--bad);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 13px;
+    margin-bottom: 20px;
+    display: none;
+  }
+  .banner-error.visible { display: block; }
+  #results { display: flex; flex-direction: column; gap: 16px; }
+  .site-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .site-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .site-card-title {
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .site-card-sub {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+  .badges { display: flex; gap: 8px; }
+  .badge {
+    font-size: 12px;
+    padding: 4px 9px;
+    border-radius: 999px;
+    font-weight: 600;
+  }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+  .badge.bad { background: var(--bad-bg); color: var(--bad); }
+  .day-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .day-cell {
+    min-height: 34px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    background: var(--panel-2);
+    color: var(--text-dim);
+    cursor: default;
+    position: relative;
+  }
+  .day-cell[title]:hover::after { content: none; }
+  .day-cell.ok { background: var(--ok-bg); color: var(--ok); }
+  .day-cell.problem { background: var(--warn-bg); color: var(--warn); }
+  .day-cell.missing { background: var(--bad-bg); color: var(--bad); }
+  .legend {
+    display: flex;
+    gap: 14px;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .notes-log {
+    font-size: 12px;
+    color: var(--text-dim);
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+    margin-top: 4px;
+  }
+  .notes-log ul { margin: 6px 0 0; padding-left: 18px; }
+  .notes-log li { margin-bottom: 4px; }
+  .empty-hint {
+    color: var(--text-dim);
+    font-size: 13px;
+    text-align: center;
+    padding: 30px 0;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Verificador de Veiculação de Banners</h1>
+  <p>Confira automaticamente se os comprovantes em PDF de cada site cobrem todos os dias do mês, com o banner correto no ar e a data legível.</p>
+</header>
+
+<main>
+  <div class="banner-error" id="apiErrorBanner"></div>
+
+  <section class="panel">
+    <h2>1. Mês e ano de referência</h2>
+    <div class="row">
+      <div class="field">
+        <label for="monthSelect">Mês</label>
+        <select id="monthSelect"></select>
+      </div>
+      <div class="field">
+        <label for="yearSelect">Ano</label>
+        <select id="yearSelect"></select>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>2. Imagens de referência do banner</h2>
+    <div class="upload-zone" id="refUploadZone">
+      Clique ou arraste imagens PNG/JPG do banner (pode adicionar mais de uma)
+      <input type="file" id="refInput" accept="image/*" multiple>
+    </div>
+    <div class="chiplist" id="refChips"></div>
+    <div class="status-msg" id="refUploadStatus"></div>
+  </section>
+
+  <section class="panel">
+    <h2>3. PDFs de comprovação (um por site, até 20)</h2>
+    <div class="upload-zone" id="pdfUploadZone">
+      Clique ou arraste os PDFs recebidos dos sites
+      <input type="file" id="pdfInput" accept="application/pdf" multiple>
+    </div>
+    <div class="chiplist" id="pdfChips"></div>
+    <div class="status-msg" id="pdfLimitStatus"></div>
+
+    <div class="run-row">
+      <button class="btn btn-primary" id="runBtn">Analisar veiculação</button>
+      <div class="progress-wrap" id="progressWrap">
+        <div class="progress-label" id="progressLabel">0 / 0 prints analisados</div>
+        <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="results">
+    <div class="empty-hint">Os resultados por site aparecerão aqui após a análise.</div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+(function () {
+  'use strict';
+
+  const MAX_PDFS = 20;
+
+  const state = {
+    month: new Date().getMonth(),
+    year: new Date().getFullYear(),
+    refs: [],
+    pdfs: [],
+    results: [],
+    isRunning: false,
+    progress: { done: 0, total: 0 }
+  };
+
+  const MONTH_NAMES = [
+    'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+    'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+  ];
+
+  class ApiKeyError extends Error {}
+
+  // ---------- Elements ----------
+  const el = {
+    apiErrorBanner: document.getElementById('apiErrorBanner'),
+    monthSelect: document.getElementById('monthSelect'),
+    yearSelect: document.getElementById('yearSelect'),
+    refInput: document.getElementById('refInput'),
+    refChips: document.getElementById('refChips'),
+    refUploadZone: document.getElementById('refUploadZone'),
+    refUploadStatus: document.getElementById('refUploadStatus'),
+    pdfInput: document.getElementById('pdfInput'),
+    pdfChips: document.getElementById('pdfChips'),
+    pdfUploadZone: document.getElementById('pdfUploadZone'),
+    pdfLimitStatus: document.getElementById('pdfLimitStatus'),
+    runBtn: document.getElementById('runBtn'),
+    progressWrap: document.getElementById('progressWrap'),
+    progressLabel: document.getElementById('progressLabel'),
+    progressFill: document.getElementById('progressFill'),
+    results: document.getElementById('results')
+  };
+
+  function showApiErrorBanner(message) {
+    el.apiErrorBanner.textContent = message;
+    el.apiErrorBanner.classList.add('visible');
+  }
+  function hideApiErrorBanner() {
+    el.apiErrorBanner.classList.remove('visible');
+  }
+
+  // ---------- Month/year selectors ----------
+  function populateMonthYearSelectors() {
+    el.monthSelect.innerHTML = MONTH_NAMES
+      .map((name, idx) => `<option value="${idx}">${name}</option>`)
+      .join('');
+    el.monthSelect.value = String(state.month);
+
+    const currentYear = new Date().getFullYear();
+    const years = [currentYear - 1, currentYear, currentYear + 1];
+    el.yearSelect.innerHTML = years
+      .map((y) => `<option value="${y}">${y}</option>`)
+      .join('');
+    el.yearSelect.value = String(state.year);
+
+    el.monthSelect.addEventListener('change', () => {
+      state.month = Number(el.monthSelect.value);
+    });
+    el.yearSelect.addEventListener('change', () => {
+      state.year = Number(el.yearSelect.value);
+    });
+  }
+
+  function parseIsoDateInMonth(isoDate, month, year) {
+    if (!isoDate || typeof isoDate !== 'string') return null;
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+    if (!match) return null;
+    const y = Number(match[1]);
+    const m = Number(match[2]) - 1;
+    const d = Number(match[3]);
+    if (y !== year || m !== month) return null;
+    if (d < 1 || d > 31) return null;
+    return d;
+  }
+
+  // ---------- Drag and drop ----------
+  function setupDropZone(zoneEl, onFiles) {
+    ['dragenter', 'dragover'].forEach((evt) => {
+      zoneEl.addEventListener(evt, (e) => {
+        e.preventDefault();
+        zoneEl.classList.add('dragover');
+      });
+    });
+    ['dragleave', 'dragend'].forEach((evt) => {
+      zoneEl.addEventListener(evt, (e) => {
+        e.preventDefault();
+        zoneEl.classList.remove('dragover');
+      });
+    });
+    zoneEl.addEventListener('drop', (e) => {
+      e.preventDefault();
+      zoneEl.classList.remove('dragover');
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+        onFiles(e.dataTransfer.files);
+      }
+    });
+  }
+
+  // ---------- Reference uploads ----------
+  el.refInput.addEventListener('change', (e) => handleRefUpload(e.target.files));
+  setupDropZone(el.refUploadZone, handleRefUpload);
+
+  function isImageFile(file) {
+    if (file.type) return file.type.startsWith('image/');
+    return /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name);
+  }
+
+  function loadImageFromFile(file) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('não foi possível carregar a imagem')); };
+      img.src = url;
+    });
+  }
+
+  const REF_IMAGE_MAX_DIM = 1024; // reduz custo de tokens de imagem enviados em toda chamada à API
+  const REF_IMAGE_QUALITY = 0.85;
+
+  async function downscaleImage(file) {
+    const img = await loadImageFromFile(file);
+    let { width, height } = img;
+    if (width > REF_IMAGE_MAX_DIM || height > REF_IMAGE_MAX_DIM) {
+      const scale = REF_IMAGE_MAX_DIM / Math.max(width, height);
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+    const dataUrl = canvas.toDataURL('image/jpeg', REF_IMAGE_QUALITY);
+    canvas.width = 0;
+    canvas.height = 0;
+    return dataUrl;
+  }
+
+  async function handleRefUpload(fileList) {
+    const files = Array.from(fileList);
+    const invalidFiles = files.filter((f) => !isImageFile(f));
+    const validFiles = files.filter((f) => isImageFile(f));
+    const messages = [];
+    if (invalidFiles.length > 0) {
+      messages.push(`${invalidFiles.length} arquivo(s) ignorado(s) por não serem imagens (PNG/JPG).`);
+    }
+
+    for (const file of validFiles) {
+      const isDuplicate = state.refs.some((r) => r.name === file.name);
+      if (isDuplicate) {
+        messages.push(`"${file.name}" já foi adicionado — ignorado.`);
+        continue;
+      }
+      try {
+        const dataUrl = await downscaleImage(file);
+        const [, mediaType, base64] = /^data:(.+?);base64,(.*)$/.exec(dataUrl) || [];
+        if (!base64) throw new Error('formato de imagem não reconhecido');
+        state.refs.push({ name: file.name, base64, mediaType, dataUrl });
+      } catch (err) {
+        messages.push(`Falha ao processar "${file.name}": ${err.message}`);
+      }
+    }
+
+    el.refUploadStatus.textContent = messages.join(' ');
+    el.refUploadStatus.className = messages.length > 0 ? 'status-msg error' : 'status-msg';
+    renderRefChips();
+    el.refInput.value = '';
+  }
+
+  function renderRefChips() {
+    el.refChips.innerHTML = state.refs.map((ref, idx) => `
+      <div class="chip">
+        <img src="${ref.dataUrl}" alt="">
+        <span class="name">${escapeHtml(ref.name)}</span>
+        <button class="remove" data-idx="${idx}" data-type="ref" type="button">×</button>
+      </div>
+    `).join('');
+  }
+
+  // ---------- PDF uploads ----------
+  el.pdfInput.addEventListener('change', (e) => handlePdfUpload(e.target.files));
+  setupDropZone(el.pdfUploadZone, handlePdfUpload);
+
+  function isPdfFile(file) {
+    if (file.type) return file.type === 'application/pdf';
+    return /\.pdf$/i.test(file.name);
+  }
+
+  function handlePdfUpload(fileList) {
+    const incoming = Array.from(fileList);
+    const invalidFiles = incoming.filter((f) => !isPdfFile(f));
+    const pdfFiles = incoming.filter((f) => isPdfFile(f));
+
+    const existingKeys = new Set(state.pdfs.map((p) => `${p.name}:${p.file.size}`));
+    const deduped = [];
+    let duplicateCount = 0;
+    pdfFiles.forEach((file) => {
+      const key = `${file.name}:${file.size}`;
+      if (existingKeys.has(key)) {
+        duplicateCount++;
+        return;
+      }
+      existingKeys.add(key);
+      deduped.push(file);
+    });
+
+    const availableSlots = MAX_PDFS - state.pdfs.length;
+    const accepted = deduped.slice(0, Math.max(0, availableSlots));
+    const rejectedCount = deduped.length - accepted.length;
+
+    accepted.forEach((file) => {
+      state.pdfs.push({ name: file.name, file });
+    });
+
+    const messages = [];
+    if (invalidFiles.length > 0) messages.push(`${invalidFiles.length} arquivo(s) ignorado(s) por não serem PDF.`);
+    if (duplicateCount > 0) messages.push(`${duplicateCount} arquivo(s) duplicado(s) ignorado(s) (já adicionado anteriormente).`);
+    if (rejectedCount > 0) messages.push(`Limite de ${MAX_PDFS} PDFs — ${rejectedCount} arquivo(s) não foram adicionados.`);
+
+    el.pdfLimitStatus.textContent = messages.join(' ');
+    el.pdfLimitStatus.className = messages.length > 0 ? 'status-msg error' : 'status-msg';
+
+    renderPdfChips();
+    el.pdfInput.value = '';
+  }
+
+  function renderPdfChips() {
+    el.pdfChips.innerHTML = state.pdfs.map((pdf, idx) => `
+      <div class="chip">
+        <span class="doc-icon">📄</span>
+        <span class="name">${escapeHtml(pdf.name)}</span>
+        <button class="remove" data-idx="${idx}" data-type="pdf" type="button">×</button>
+      </div>
+    `).join('');
+  }
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.remove');
+    if (!btn) return;
+    const idx = Number(btn.dataset.idx);
+    if (btn.dataset.type === 'ref') {
+      state.refs.splice(idx, 1);
+      renderRefChips();
+    } else if (btn.dataset.type === 'pdf') {
+      state.pdfs.splice(idx, 1);
+      renderPdfChips();
+    }
+  });
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  // ---------- PDF rendering ----------
+  async function renderPdfPages(fileEntry) {
+    const buf = await fileEntry.file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    const pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 1.6 });
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      const base64 = dataUrl.split(',')[1];
+      pages.push({ pageNumber: i, base64, mediaType: 'image/jpeg' });
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+    return pages;
+  }
+
+  // ---------- Analysis via serverless proxy (esconde a chave da OpenAI no servidor) ----------
+  async function analyzePage(pageImage, refs) {
+    const res = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        refs: refs.map((r) => ({ base64: r.base64, mediaType: r.mediaType })),
+        pageImage: { base64: pageImage.base64, mediaType: pageImage.mediaType }
+      })
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiKeyError(body.message || 'Chave de API inválida ou sem créditos no servidor.');
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.message || `Erro ao consultar o servidor (status ${res.status}).`);
+    }
+    return res.json();
+  }
+
+  // ---------- Day status resolution ----------
+  const SEVERITY = { missing: 3, problem: 2, ok: 1, pending: 0 };
+
+  function resolveDayStatus(existingStatus, newStatus) {
+    if (!existingStatus) return newStatus;
+    return SEVERITY[newStatus] > SEVERITY[existingStatus] ? newStatus : existingStatus;
+  }
+
+  // ---------- Concurrency pool ----------
+  async function processQueue(tasks, concurrency, workerFn) {
+    let cursor = 0;
+    async function worker() {
+      while (cursor < tasks.length) {
+        const idx = cursor++;
+        await workerFn(tasks[idx], idx);
+      }
+    }
+    await Promise.all(Array.from({ length: concurrency }, worker));
+  }
+
+  // ---------- Progress ----------
+  function updateProgressBar() {
+    const { done, total } = state.progress;
+    el.progressLabel.textContent = `${done} / ${total} prints analisados`;
+    el.progressFill.style.width = total > 0 ? `${(done / total) * 100}%` : '0%';
+  }
+
+  // ---------- Site card rendering ----------
+  function daysInSelectedMonth() {
+    return new Date(state.year, state.month + 1, 0).getDate();
+  }
+
+  function createSiteCard(siteResult) {
+    const totalDays = daysInSelectedMonth();
+    const counts = { ok: 0, problem: 0, missing: 0 };
+    const cells = [];
+
+    for (let day = 1; day <= totalDays; day++) {
+      const info = siteResult.days.get(day);
+      const status = info ? info.status : (siteResult.complete ? 'missing' : 'pending');
+      if (status !== 'pending') counts[status] = (counts[status] || 0) + 1;
+      const notesAttr = info && info.notes ? escapeHtml(info.notes) : 'Nenhum print encontrado para este dia.';
+      cells.push(`<div class="day-cell ${status}" title="Dia ${day}: ${notesAttr}">${day}</div>`);
+    }
+
+    const notesHtml = siteResult.extraNotes.length
+      ? `<div class="notes-log"><strong>Notas adicionais</strong><ul>${siteResult.extraNotes.map((n) => `<li>${escapeHtml(n)}</li>`).join('')}</ul></div>`
+      : '';
+
+    return `
+      <div class="site-card" data-site="${escapeHtml(siteResult.siteName)}">
+        <div class="site-card-header">
+          <div>
+            <div class="site-card-title">${escapeHtml(siteResult.siteName)}</div>
+            <div class="site-card-sub">${totalDays} dias no mês selecionado</div>
+          </div>
+          <div class="badges">
+            <span class="badge ok">✓ ${counts.ok} ok</span>
+            <span class="badge warn">△ ${counts.problem} c/ problema</span>
+            <span class="badge bad">✕ ${counts.missing} faltando</span>
+          </div>
+        </div>
+        <div class="legend">
+          <span><span class="dot" style="background:var(--ok)"></span>Ok</span>
+          <span><span class="dot" style="background:var(--warn)"></span>Problema</span>
+          <span><span class="dot" style="background:var(--bad)"></span>Faltando</span>
+          <span><span class="dot" style="background:var(--panel-2);border:1px solid var(--line)"></span>Pendente</span>
+        </div>
+        <div class="day-grid">${cells.join('')}</div>
+        ${notesHtml}
+      </div>
+    `;
+  }
+
+  function renderAllSiteCards() {
+    if (state.results.length === 0) {
+      el.results.innerHTML = '<div class="empty-hint">Os resultados por site aparecerão aqui após a análise.</div>';
+      return;
+    }
+    el.results.innerHTML = state.results.map(createSiteCard).join('');
+  }
+
+  // ---------- Main orchestrator ----------
+  el.runBtn.addEventListener('click', runAnalysis);
+
+  async function runAnalysis() {
+    hideApiErrorBanner();
+
+    if (state.refs.length === 0) {
+      showApiErrorBanner('Adicione pelo menos uma imagem de referência do banner.');
+      return;
+    }
+    if (state.pdfs.length === 0) {
+      showApiErrorBanner('Adicione pelo menos um PDF de comprovação.');
+      return;
+    }
+
+    state.isRunning = true;
+    el.runBtn.disabled = true;
+    el.runBtn.textContent = 'Analisando...';
+    el.progressWrap.classList.add('visible');
+
+    state.results = state.pdfs.map((pdf) => ({
+      siteName: pdf.name,
+      days: new Map(),
+      extraNotes: [],
+      complete: false
+    }));
+    renderAllSiteCards();
+
+    try {
+      const tasks = [];
+      const pagesRemaining = new Array(state.pdfs.length).fill(0);
+      for (let siteIndex = 0; siteIndex < state.pdfs.length; siteIndex++) {
+        try {
+          const pages = await renderPdfPages(state.pdfs[siteIndex]);
+          pages.forEach((pageImage) => tasks.push({ siteIndex, pageImage }));
+          pagesRemaining[siteIndex] = pages.length;
+        } catch (err) {
+          state.results[siteIndex].extraNotes.push(`Falha ao ler o PDF: ${err.message}`);
+          pagesRemaining[siteIndex] = 0;
+        }
+      }
+      state.results.forEach((result, idx) => {
+        if (pagesRemaining[idx] === 0) result.complete = true;
+      });
+
+      state.progress = { done: 0, total: tasks.length };
+      updateProgressBar();
+      renderAllSiteCards();
+
+      let stoppedForApiKey = false;
+
+      await processQueue(tasks, 4, async (task) => {
+        if (stoppedForApiKey) return;
+        const { siteIndex, pageImage } = task;
+        const siteResult = state.results[siteIndex];
+        try {
+          const analysis = await analyzePage(pageImage, state.refs);
+          if (analysis.prints.length === 0) {
+            siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: nenhum print reconhecível encontrado.`);
+          }
+          analysis.prints.forEach((print) => {
+            const day = parseIsoDateInMonth(print.date_found, state.month, state.year);
+            if (day === null) {
+              siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: print sem data reconhecível no mês selecionado. ${print.notes || ''}`.trim());
+              return;
+            }
+            const newStatus = print.banner_found ? 'ok' : 'problem';
+            const existing = siteResult.days.get(day);
+            const resolvedStatus = resolveDayStatus(existing ? existing.status : null, newStatus);
+            siteResult.days.set(day, { status: resolvedStatus, notes: print.notes || '' });
+          });
+        } catch (err) {
+          if (err instanceof ApiKeyError) {
+            stoppedForApiKey = true;
+            showApiErrorBanner(err.message);
+          } else {
+            siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: ${err.message}`);
+          }
+        } finally {
+          pagesRemaining[siteIndex]--;
+          if (pagesRemaining[siteIndex] === 0) siteResult.complete = true;
+          state.progress.done++;
+          updateProgressBar();
+          renderAllSiteCards();
+        }
+      });
+    } finally {
+      state.isRunning = false;
+      el.runBtn.disabled = false;
+      el.runBtn.textContent = 'Analisar veiculação';
+      el.progressWrap.classList.remove('visible');
+    }
+  }
+
+  // ---------- Boot ----------
+  localStorage.removeItem('bannerAudit.apiKey'); // limpeza de chave da versão anterior (Anthropic client-side)
+  populateMonthYearSelectors();
+})();
+</script>
+</body>
+</html>
