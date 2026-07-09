@@ -17,18 +17,27 @@ formatos/tamanhos diferentes, mas é sempre a mesma arte/campanha), e depois
 uma imagem de uma página de PDF que pode conter um ou mais prints/capturas de
 tela separadas, cada uma mostrando um site com o banner supostamente no ar,
 e alguma indicação de data (pode ser um timestamp de captura, um relógio do
-sistema, uma data exibida na página, etc).
+sistema, ou a data de publicação de uma matéria/notícia visível na página).
 
 Para CADA print distinto que você identificar na imagem da página, responda:
 - banner_found: true se a arte do banner na imagem de referência aparece
   visivelmente no print, false caso contrário.
-- date_found: a data visível no print, no formato estrito YYYY-MM-DD.
-  Se não houver nenhuma data legível no print, use null.
+- date_found: a data que comprova o dia da captura, no formato estrito
+  YYYY-MM-DD, seguindo esta ordem de prioridade de evidências:
+  1. Relógio do sistema ou timestamp de captura visível no print — se
+     existir, use SEMPRE essa data, mesmo que haja outras datas na página.
+  2. Se não houver relógio/timestamp, use a data de publicação de uma
+     matéria/notícia visível na página (byline, "publicado em", data junto
+     ao título). Se houver várias matérias com datas diferentes, use a
+     MAIS RECENTE — matérias antigas permanecem na página por dias.
+  3. Se não houver nenhuma das duas, use null.
   IMPORTANTE: as datas nos prints estão no formato brasileiro DD/MM/AAAA
   (dia/mês/ano). Ao converter para YYYY-MM-DD, interprete SEMPRE o primeiro
   número como dia e o segundo como mês, nunca o contrário.
   Exemplo: "05/06/2026" é 5 de junho de 2026 → "2026-06-05".
-- notes: uma frase curta em português explicando o que foi observado.
+- notes: uma frase curta em português explicando o que foi observado,
+  mencionando qual evidência de data foi usada (relógio do sistema ou
+  data de matéria).
 
 Responda APENAS com um JSON válido, sem markdown, sem texto extra,
 no formato exato:
