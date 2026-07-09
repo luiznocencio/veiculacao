@@ -30,35 +30,33 @@ veiculação — considere apenas o que está DENTRO do screenshot do site.
 Para CADA print distinto que você identificar na imagem da página, responda:
 - banner_found: true se a arte do banner na imagem de referência aparece
   visivelmente no print, false caso contrário.
-- date_text: a transcrição LITERAL da data que comprova o dia da captura,
-  exatamente como ela aparece escrita no print (ex: "01/06/2026" ou
-  "1 de junho de 2026"). NÃO converta, NÃO reformate — apenas copie os
-  caracteres que você enxerga. Ordem de prioridade de evidências (todas
-  avaliadas somente DENTRO do screenshot do site, nunca no timbrado):
-  1. Relógio do sistema ou timestamp de captura visível dentro do print —
-     se existir, use SEMPRE essa data, mesmo que haja outras datas na página.
-  2. Se não houver relógio/timestamp, use a data de publicação de uma
-     matéria/notícia visível dentro do print (byline, "publicado em", data
-     junto ao título). Se houver várias matérias com datas diferentes, use a
-     MAIS RECENTE — matérias antigas permanecem na página por dias.
-  3. Se não houver nenhuma das duas dentro do print, use null — mesmo que
-     o timbrado ao redor tenha uma data.
-  Leia os dígitos com atenção redobrada. Se a data estiver borrada ou
-  pequena demais para leitura segura, use null em vez de arriscar — uma data
-  confiantemente errada é pior para a auditoria do que uma pendência de
-  revisão humana.
-- date_found: date_text convertida para o formato estrito YYYY-MM-DD.
-  As datas numéricas nos prints estão no formato brasileiro DD/MM/AAAA
-  (dia/mês/ano): o primeiro número é SEMPRE o dia, o segundo é SEMPRE o mês.
-  Exemplo: date_text "05/06/2026" → date_found "2026-06-05" (5 de junho).
-  Se date_text for null, date_found também é null.
-- notes: uma frase curta em português explicando o que foi observado,
-  mencionando qual evidência de data foi usada (relógio do sistema ou
-  data de matéria) e, se uma data de timbrado foi ignorada, mencione isso.
+- clock_date_text: a transcrição LITERAL da data mostrada pelo relógio do
+  sistema ou timestamp de captura DENTRO do print, exatamente como aparece
+  escrita (ex: "18/06/2026"). DICA IMPORTANTE: em capturas de desktop
+  Windows, o relógio fica no CANTO INFERIOR DIREITO da barra de tarefas,
+  com a hora em cima e a data logo abaixo (ex: "11:55" sobre "18/06/2026").
+  Examine esse canto com atenção máxima antes de responder. Use null apenas
+  se realmente não houver relógio/timestamp legível no print.
+- article_date_text: a transcrição LITERAL da data de publicação da matéria
+  mais recente visível dentro do print — byline, "publicado em", data junto
+  ao título, ou data no caminho da URL da barra de endereços (ex:
+  ".../2026/06/02/..." → transcreva "2026/06/02"). Se houver várias matérias
+  com datas diferentes, transcreva a MAIS RECENTE. null se não houver.
+- notes: uma frase curta em português explicando o que foi observado e
+  onde cada data foi vista; se uma data de timbrado foi ignorada, mencione.
+
+Regras para as transcrições:
+- NÃO converta, NÃO reformate — apenas copie os caracteres que você enxerga.
+- Considere apenas o que está DENTRO do screenshot do site; datas do
+  documento timbrado ao redor (emissão, assinatura, rodapé) NUNCA entram
+  em nenhum dos dois campos.
+- Se uma data estiver borrada ou pequena demais para leitura segura, use
+  null naquele campo em vez de arriscar — uma data confiantemente errada é
+  pior para a auditoria do que uma pendência de revisão humana.
 
 Responda APENAS com um JSON válido, sem markdown, sem texto extra,
 no formato exato:
-{"prints":[{"banner_found":true,"date_text":"03/07/2026","date_found":"2026-07-03","notes":"..."}]}
+{"prints":[{"banner_found":true,"clock_date_text":"03/07/2026","article_date_text":"2026/07/03","notes":"..."}]}
 
 Se a página não tiver nenhum print reconhecível, responda {"prints":[]}.`;
 
@@ -154,7 +152,20 @@ function dateTextToIso(dateText) {
   if (!dateText) return null;
   const t = String(dateText).trim().toLowerCase();
 
-  let m = /(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{2,4})/.exec(t);
+  // formato de URL/ISO com ano na frente: 2026/06/02, 2026-06-02
+  let m = /(\d{4})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})/.exec(t);
+  if (m) {
+    const year = Number(m[1]);
+    const month = Number(m[2]);
+    const day = Number(m[3]);
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+    return null;
+  }
+
+  // formato brasileiro DD/MM/AAAA
+  m = /(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{2,4})/.exec(t);
   if (m) {
     const day = Number(m[1]);
     const month = Number(m[2]);
@@ -166,6 +177,7 @@ function dateTextToIso(dateText) {
     return null;
   }
 
+  // formato por extenso: "1 de junho de 2026", "1º de junho 2026"
   m = /(\d{1,2})\s*(?:º\s*)?de\s+([a-zç]+)(?:\s+de)?\s+(\d{4})/.exec(t);
   if (m) {
     const day = Number(m[1]);
@@ -178,10 +190,15 @@ function dateTextToIso(dateText) {
   return null;
 }
 
+// A prioridade de evidências é aplicada AQUI, em código, e não pelo modelo:
+// relógio do sistema vence sempre que existir; data de matéria é fallback.
+// (Mantém compatibilidade com o campo legado date_text/date_found.)
 function normalizePrintDates(parsed) {
   parsed.prints.forEach((print) => {
-    const isoFromText = dateTextToIso(print.date_text);
-    if (isoFromText) print.date_found = isoFromText;
+    const fromClock = dateTextToIso(print.clock_date_text);
+    const fromArticle = dateTextToIso(print.article_date_text);
+    const fromLegacyText = dateTextToIso(print.date_text);
+    print.date_found = fromClock || fromArticle || fromLegacyText || print.date_found || null;
   });
   return parsed;
 }
