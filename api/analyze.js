@@ -45,6 +45,10 @@ Para CADA print distinto que você identificar na imagem da página, responda:
   (dia/mês/ano). Ao converter para YYYY-MM-DD, interprete SEMPRE o primeiro
   número como dia e o segundo como mês, nunca o contrário.
   Exemplo: "05/06/2026" é 5 de junho de 2026 → "2026-06-05".
+  Leia os dígitos do ano com atenção redobrada. Se o ano estiver borrado ou
+  pequeno demais para leitura segura, use null em vez de arriscar — uma data
+  confiantemente errada é pior para a auditoria do que uma pendência de
+  revisão humana.
 - notes: uma frase curta em português explicando o que foi observado,
   mencionando qual evidência de data foi usada (relógio do sistema ou
   data de matéria) e, se uma data de timbrado foi ignorada, mencione isso.
@@ -86,7 +90,25 @@ function resolveWaitMs(res, attempt) {
   return RETRY_BASE_DELAY_MS * (attempt + 1) + Math.floor(Math.random() * 300);
 }
 
-function buildRequestBody(refs, pageImage) {
+const MONTH_NAMES_PT = [
+  'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
+  'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'
+];
+
+function buildAnalysisText(period) {
+  let text = 'Analise esta página de comprovação de veiculação e identifique cada print presente, seguindo exatamente as instruções do system prompt.';
+  if (period) {
+    const monthName = MONTH_NAMES_PT[period.month - 1];
+    text += ` Contexto de auditoria: o período em verificação é ${monthName} de ${period.year}. ` +
+      'Use este contexto APENAS para conferir a plausibilidade do ano lido — capturas de comprovação ' +
+      `são recentes, então um ano como ${period.year - 20} é quase certamente leitura errada de ${period.year}. ` +
+      'NUNCA invente uma data que não esteja visível; se a data legível indicar claramente outro mês ou ano, ' +
+      'reporte exatamente o que está escrito.';
+  }
+  return text;
+}
+
+function buildRequestBody(refs, pageImage, period) {
   const content = [
     ...refs.map((ref, idx) => ({
       type: 'image',
@@ -99,7 +121,7 @@ function buildRequestBody(refs, pageImage) {
     },
     {
       type: 'text',
-      text: 'Analise esta página de comprovação de veiculação e identifique cada print presente, seguindo exatamente as instruções do system prompt.'
+      text: buildAnalysisText(period)
     }
   ];
   return {
@@ -192,13 +214,20 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const { refs, pageImage } = req.body || {};
+  const { refs, pageImage, period } = req.body || {};
   if (!Array.isArray(refs) || refs.length === 0 || !pageImage || !pageImage.base64 || !pageImage.mediaType) {
     res.status(400).json({ error: 'invalid_request', message: 'refs (array não vazio) e pageImage são obrigatórios.' });
     return;
   }
 
-  const body = buildRequestBody(refs, pageImage);
+  // period é opcional; só é usado se vier bem formado
+  const validPeriod =
+    period && Number.isInteger(period.month) && period.month >= 1 && period.month <= 12 &&
+    Number.isInteger(period.year) && period.year >= 2000 && period.year <= 2100
+      ? period
+      : null;
+
+  const body = buildRequestBody(refs, pageImage, validPeriod);
 
   try {
     const upstreamRes = await callAnthropicWithRetry(apiKey, body, startedAt);

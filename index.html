@@ -663,19 +663,29 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   }
 
   // ---------- PDF rendering ----------
+  // Lado maior mira 1568px: acima disso a Anthropic redimensiona a imagem de volta,
+  // e abaixo disso datas pequenas (relógio de barra de tarefas, bylines de matérias)
+  // ficam borradas demais para leitura confiável do ano.
+  const TARGET_LONG_EDGE = 1568;
+  const MAX_RENDER_SCALE = 2.6;
+  const PAGE_JPEG_QUALITY = 0.9;
+
   async function renderPdfPages(fileEntry) {
     const buf = await fileEntry.file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     const pages = [];
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 1.6 });
+      const baseViewport = page.getViewport({ scale: 1 });
+      const longEdge = Math.max(baseViewport.width, baseViewport.height);
+      const scale = Math.min(TARGET_LONG_EDGE / longEdge, MAX_RENDER_SCALE);
+      const viewport = page.getViewport({ scale });
       const canvas = document.createElement('canvas');
       canvas.width = viewport.width;
       canvas.height = viewport.height;
       const ctx = canvas.getContext('2d');
       await page.render({ canvasContext: ctx, viewport }).promise;
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      const dataUrl = canvas.toDataURL('image/jpeg', PAGE_JPEG_QUALITY);
       const base64 = dataUrl.split(',')[1];
       pages.push({ pageNumber: i, base64, mediaType: 'image/jpeg' });
       canvas.width = 0;
@@ -691,7 +701,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         refs: refs.map((r) => ({ base64: r.base64, mediaType: r.mediaType })),
-        pageImage: { base64: pageImage.base64, mediaType: pageImage.mediaType }
+        pageImage: { base64: pageImage.base64, mediaType: pageImage.mediaType },
+        period: { month: state.month + 1, year: state.year }
       })
     });
 
