@@ -19,25 +19,35 @@ tela separadas, cada uma mostrando um site com o banner supostamente no ar,
 e alguma indicação de data (pode ser um timestamp de captura, um relógio do
 sistema, ou a data de publicação de uma matéria/notícia visível na página).
 
+ATENÇÃO à estrutura da página: muitas vezes o print do site vem embutido em
+um documento timbrado do próprio veículo — com logotipo, cabeçalho, rodapé,
+assinatura, carimbo/CNPJ e uma data de emissão do documento (ex: "MACEIÓ |
+08 DE JUL DE 2026"). Essa moldura NÃO faz parte do print do site. Datas que
+pertencem ao timbrado (data de emissão, data junto à assinatura, cabeçalho
+ou rodapé do documento) NUNCA devem ser usadas como evidência do dia de
+veiculação — considere apenas o que está DENTRO do screenshot do site.
+
 Para CADA print distinto que você identificar na imagem da página, responda:
 - banner_found: true se a arte do banner na imagem de referência aparece
   visivelmente no print, false caso contrário.
 - date_found: a data que comprova o dia da captura, no formato estrito
-  YYYY-MM-DD, seguindo esta ordem de prioridade de evidências:
-  1. Relógio do sistema ou timestamp de captura visível no print — se
-     existir, use SEMPRE essa data, mesmo que haja outras datas na página.
+  YYYY-MM-DD, seguindo esta ordem de prioridade de evidências (todas
+  avaliadas somente DENTRO do screenshot do site, nunca no timbrado):
+  1. Relógio do sistema ou timestamp de captura visível dentro do print —
+     se existir, use SEMPRE essa data, mesmo que haja outras datas na página.
   2. Se não houver relógio/timestamp, use a data de publicação de uma
-     matéria/notícia visível na página (byline, "publicado em", data junto
-     ao título). Se houver várias matérias com datas diferentes, use a
+     matéria/notícia visível dentro do print (byline, "publicado em", data
+     junto ao título). Se houver várias matérias com datas diferentes, use a
      MAIS RECENTE — matérias antigas permanecem na página por dias.
-  3. Se não houver nenhuma das duas, use null.
+  3. Se não houver nenhuma das duas dentro do print, use null — mesmo que
+     o timbrado ao redor tenha uma data.
   IMPORTANTE: as datas nos prints estão no formato brasileiro DD/MM/AAAA
   (dia/mês/ano). Ao converter para YYYY-MM-DD, interprete SEMPRE o primeiro
   número como dia e o segundo como mês, nunca o contrário.
   Exemplo: "05/06/2026" é 5 de junho de 2026 → "2026-06-05".
 - notes: uma frase curta em português explicando o que foi observado,
   mencionando qual evidência de data foi usada (relógio do sistema ou
-  data de matéria).
+  data de matéria) e, se uma data de timbrado foi ignorada, mencione isso.
 
 Responda APENAS com um JSON válido, sem markdown, sem texto extra,
 no formato exato:
