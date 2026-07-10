@@ -1370,6 +1370,14 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         if (outOfOrder) {
           siteResult.extraNotes.push('As datas lidas não estão em ordem crescente entre as páginas. Isso pode ser só a ordem do PDF, ou uma data lida errada — vale conferir.');
         }
+        // Um dia amarelo não pode ficar sem explicação: nomear cada um e o porquê.
+        const problemDays = [...siteResult.days.entries()]
+          .filter(([, info]) => info.status === 'problem')
+          .sort((a, b) => a[0] - b[0]);
+        problemDays.forEach(([day, info]) => {
+          siteResult.extraNotes.push(`Dia ${day} (página ${info.page}): ${info.notes}`);
+        });
+
         // Um site inteiro sem nenhum banner reconhecido quase sempre significa que a arte
         // daquela criação (ex: versão mobile) não foi enviada — não que o site não veiculou.
         const anyBanner = [...siteResult.days.values()].some((d) => d.status === 'ok');

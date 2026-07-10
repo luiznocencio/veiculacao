@@ -1,15 +1,14 @@
 // api/analyze.js — função serverless da Vercel (Node.js, sem dependências externas).
 //
-// Papel reduzido de propósito: esta função é apenas o FALLBACK de leitura de data,
-// acionado quando o OCR local (Tesseract, no navegador) não encontra nenhuma data.
-// A detecção do banner NÃO é feita aqui e nunca mais será: o modelo se mostrou incapaz
-// de negar a presença do banner — em controles negativos (páginas do portal sem o
-// banner) ele respondia "encontrado" e inventava a justificativa. Isso agora é
-// resolvido no cliente por casamento de template, que é determinístico e auditável.
+// Papel: leitura da DATA de captura de uma página de comprovação.
+//
+// A detecção do banner NÃO é feita aqui, por decisão baseada em evidência: em controles
+// negativos (páginas do portal sem o banner) o modelo respondia "encontrado" e inventava
+// a justificativa. Quem decide sobre o banner é o casamento de template no cliente, que
+// é determinístico e devolve um score auditável.
 
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_VERSION = '2023-06-01';
-const MODEL_ID = 'claude-haiku-4-5-20251001';
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+const MODEL_ID = 'gpt-4o-mini';
 const MAX_RETRIES = 2;
 const RETRY_BASE_DELAY_MS = 600;
 const FUNCTION_BUDGET_MS = 24000; // margem de segurança sob o maxDuration:30 do vercel.json
@@ -64,21 +63,30 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// headers x-ratelimit-reset-* da OpenAI vêm como duração: "6m0s", "1s", "250ms"
+function parseOpenAIDuration(str) {
+  if (!str) return null;
+  const m = /^(?:(\d+)m)?(\d+(?:\.\d+)?)(ms|s)?$/.exec(str.trim());
+  if (!m) return null;
+  const minutes = m[1] ? Number(m[1]) : 0;
+  const value = Number(m[2]);
+  const unitMs = m[3] === 'ms' ? 1 : 1000;
+  return minutes * 60000 + value * unitMs;
+}
+
 function resolveWaitMs(res, attempt) {
   const retryAfter = res.headers.get('retry-after');
   if (retryAfter) return Number(retryAfter) * 1000;
 
-  // fallback: headers de rate limit da Anthropic trazem timestamps ISO 8601, não durações
-  const remReq = Number(res.headers.get('anthropic-ratelimit-requests-remaining'));
-  const remTok = Number(res.headers.get('anthropic-ratelimit-tokens-remaining'));
-  const resetReq = res.headers.get('anthropic-ratelimit-requests-reset');
-  const resetTok = res.headers.get('anthropic-ratelimit-tokens-reset');
+  const remReq = Number(res.headers.get('x-ratelimit-remaining-requests'));
+  const remTok = Number(res.headers.get('x-ratelimit-remaining-tokens'));
+  const resetReq = parseOpenAIDuration(res.headers.get('x-ratelimit-reset-requests'));
+  const resetTok = parseOpenAIDuration(res.headers.get('x-ratelimit-reset-tokens'));
 
   const candidates = [];
-  if (remReq === 0 && resetReq) candidates.push(new Date(resetReq).getTime() - Date.now());
-  if (remTok === 0 && resetTok) candidates.push(new Date(resetTok).getTime() - Date.now());
-  const valid = candidates.filter((ms) => Number.isFinite(ms) && ms > 0);
-  if (valid.length) return Math.max(...valid);
+  if (remReq === 0 && resetReq != null) candidates.push(resetReq);
+  if (remTok === 0 && resetTok != null) candidates.push(resetTok);
+  if (candidates.length) return Math.max(...candidates);
 
   return RETRY_BASE_DELAY_MS * (attempt + 1) + Math.floor(Math.random() * 300);
 }
@@ -102,18 +110,23 @@ function buildAnalysisText(period) {
 }
 
 function buildRequestBody(pageImage, period) {
-  const content = [
-    {
-      type: 'image',
-      source: { type: 'base64', media_type: pageImage.mediaType, data: pageImage.base64 }
-    },
-    { type: 'text', text: buildAnalysisText(period) }
-  ];
   return {
     model: MODEL_ID,
     max_tokens: 600,
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content }]
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image_url',
+            image_url: { url: `data:${pageImage.mediaType};base64,${pageImage.base64}` }
+          },
+          { type: 'text', text: buildAnalysisText(period) }
+        ]
+      }
+    ]
   };
 }
 
@@ -184,26 +197,25 @@ function resolveDate(parsed, period) {
   return { date_found: null };
 }
 
-async function callAnthropic(apiKey, body) {
-  return fetch(ANTHROPIC_URL, {
+async function callOpenAI(apiKey, body) {
+  return fetch(OPENAI_URL, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': ANTHROPIC_VERSION
+      authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify(body)
   });
 }
 
-async function callAnthropicWithRetry(apiKey, body, startedAt) {
+async function callOpenAIWithRetry(apiKey, body, startedAt) {
   let lastErr;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     let res;
     try {
-      res = await callAnthropic(apiKey, body);
+      res = await callOpenAI(apiKey, body);
     } catch (networkErr) {
-      lastErr = new Error('Falha de rede ao contatar a Anthropic.');
+      lastErr = new Error('Falha de rede ao contatar a OpenAI.');
       const elapsed = Date.now() - startedAt;
       if (attempt < MAX_RETRIES && elapsed + RETRY_BASE_DELAY_MS < FUNCTION_BUDGET_MS) {
         await sleep(RETRY_BASE_DELAY_MS);
@@ -213,7 +225,7 @@ async function callAnthropicWithRetry(apiKey, body, startedAt) {
     }
 
     if (res.status === 401 || res.status === 403) {
-      throw new UpstreamAuthError('Chave de API da Anthropic inválida, sem permissão ou sem créditos.');
+      throw new UpstreamAuthError('Chave de API da OpenAI inválida, sem permissão ou sem créditos.');
     }
     if (res.ok) return res;
 
@@ -227,13 +239,13 @@ async function callAnthropicWithRetry(apiKey, body, startedAt) {
         await sleep(wait);
         continue;
       }
-      // Espera longa demais (ou orçamento de tempo da função já quase esgotado): falha
-      // rápido e devolve quanto esperar, para o cliente decidir — evita o timeout da função.
-      throw new RateLimitedError(`Falha temporária da Anthropic (status ${res.status}).`, wait);
+      // Espera longa demais (ou orçamento de tempo da função quase esgotado): falha rápido
+      // e devolve quanto esperar, para o cliente decidir — evita o timeout da função.
+      throw new RateLimitedError(`Falha temporária da OpenAI (status ${res.status}).`, wait);
     }
 
     const errBody = await res.text().catch(() => '');
-    throw new Error(`Erro inesperado da Anthropic (status ${res.status}): ${errBody.slice(0, 300)}`);
+    throw new Error(`Erro inesperado da OpenAI (status ${res.status}): ${errBody.slice(0, 300)}`);
   }
   throw lastErr;
 }
@@ -245,11 +257,11 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     res.status(500).json({
       error: 'server_misconfigured',
-      message: 'ANTHROPIC_API_KEY não configurada no ambiente do servidor. Contate o administrador do projeto na Vercel.'
+      message: 'OPENAI_API_KEY não configurada no ambiente do servidor. Contate o administrador do projeto na Vercel.'
     });
     return;
   }
@@ -269,9 +281,9 @@ module.exports = async function handler(req, res) {
   const body = buildRequestBody(pageImage, validPeriod);
 
   try {
-    const upstreamRes = await callAnthropicWithRetry(apiKey, body, startedAt);
+    const upstreamRes = await callOpenAIWithRetry(apiKey, body, startedAt);
     const data = await upstreamRes.json();
-    const rawText = (data.content || []).map((block) => block.text || '').join('');
+    const rawText = data?.choices?.[0]?.message?.content || '';
     const parsed = parseModelJson(rawText);
     const resolved = resolveDate(parsed, validPeriod);
     res.status(200).json({
