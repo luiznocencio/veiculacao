@@ -848,6 +848,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   const API_LONG_EDGE = 1568; // só para o fallback de IA
   const MAX_RENDER_SCALE = 4;
   const PAGE_JPEG_QUALITY = 0.9;
+  const PAGE_CONCURRENCY = 3; // sobrepõe a espera de rede; a CPU segue serializada
 
   async function renderPdfPage(pdf, pageNumber) {
     const page = await pdf.getPage(pageNumber);
@@ -890,14 +891,42 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   const BANNER_MATCH_THRESHOLD = 0.85;
   const COARSE_W = 300, COARSE_DW = 16;
   const FINE_W = 1600, FINE_DW = 64;
+  const COARSE_PEAKS = 4; // quantos picos grosseiros distintos merecem refino
+
+  // Reduzir de ~1900px para 300px numa única chamada de drawImage produz aliasing:
+  // o canvas não faz média de área em saltos grandes, e a busca grosseira passa a
+  // premiar picos falsos. Reduzir por metades preserva a estrutura da imagem.
+  function scaledCanvas(source, w, h) {
+    let sw = source.naturalWidth || source.width;
+    let sh = source.naturalHeight || source.height;
+    let cur = source;
+    while (sw >= w * 2 && sh >= h * 2) {
+      const half = document.createElement('canvas');
+      half.width = Math.max(1, sw >> 1);
+      half.height = Math.max(1, sh >> 1);
+      const hctx = half.getContext('2d');
+      hctx.imageSmoothingEnabled = true;
+      hctx.imageSmoothingQuality = 'high';
+      hctx.drawImage(cur, 0, 0, half.width, half.height);
+      if (cur !== source) releaseCanvas(cur);
+      cur = half;
+      sw = half.width;
+      sh = half.height;
+    }
+    const out = document.createElement('canvas');
+    out.width = w;
+    out.height = h;
+    const ctx = out.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(cur, 0, 0, w, h);
+    if (cur !== source) releaseCanvas(cur);
+    return out;
+  }
 
   function imageDataOf(source, w, h) {
-    const c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
-    const ctx = c.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(source, 0, 0, w, h);
-    const data = ctx.getImageData(0, 0, w, h);
+    const c = scaledCanvas(source, w, h);
+    const data = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h);
     releaseCanvas(c);
     return data;
   }
@@ -966,7 +995,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     const tC = templateVector(refEl, COARSE_DW, CDH);
     const nC = COARSE_DW * CDH * 3;
 
-    let best = -1, bx = 0, by = 0, bw = 0;
+    const candidates = [];
     for (let r = 0.06; r <= 0.70; r *= 1.12) {
       const ww = Math.round(coarse.width * r);
       const wh = Math.round(ww / aspect);
@@ -976,30 +1005,47 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         for (let x = 0; x + ww <= coarse.width; x += step) {
           descriptor(coarse, x, y, ww, wh, COARSE_DW, CDH, scratch);
           const s = zncc(tC.v, tC.mean, tC.norm, scratch, nC);
-          if (s > best) { best = s; bx = x; by = y; bw = ww; }
+          if (s > 0) candidates.push({ s, x, y, ww });
         }
       }
     }
-    if (best < 0) return { score: -1 };
+    if (!candidates.length) return { score: -1 };
+
+    // Refinar só o melhor pico é frágil: a busca grosseira pode premiar um lugar errado
+    // e o refino, restrito à vizinhança, nunca alcança o banner. Refinamos os melhores
+    // picos bem separados entre si.
+    candidates.sort((a, b) => b.s - a.s);
+    const peaks = [];
+    for (const c of candidates) {
+      if (peaks.length >= COARSE_PEAKS) break;
+      const far = peaks.every((p) => {
+        const dx = (c.x + c.ww / 2) - (p.x + p.ww / 2);
+        const dy = (c.y + c.ww / aspect / 2) - (p.y + p.ww / aspect / 2);
+        return Math.hypot(dx, dy) > Math.max(c.ww, p.ww) * 0.5;
+      });
+      if (far) peaks.push(c);
+    }
 
     const FDH = FDH0;
     const tF = templateVector(refEl, FINE_DW, FDH);
     const nF = FINE_DW * FDH * 3;
     const f = fine.width / coarse.width;
-    const cx = Math.round(bx * f), cy = Math.round(by * f), cw = Math.round(bw * f);
 
-    let refined = -1, rx = cx, ry = cy, rw = cw;
-    for (let sc = 0.75; sc <= 1.30; sc += 0.05) {
-      const ww = Math.round(cw * sc);
-      const wh = Math.round(ww / aspect);
-      if (ww < 16 || wh < 10 || ww > fine.width || wh > fine.height) continue;
-      for (let y = cy - 36; y <= cy + 36; y += 4) {
-        if (y < 0 || y + wh > fine.height) continue;
-        for (let x = cx - 36; x <= cx + 36; x += 4) {
-          if (x < 0 || x + ww > fine.width) continue;
-          descriptor(fine, x, y, ww, wh, FINE_DW, FDH, scratch);
-          const s = zncc(tF.v, tF.mean, tF.norm, scratch, nF);
-          if (s > refined) { refined = s; rx = x; ry = y; rw = ww; }
+    let refined = -1, rx = 0, ry = 0, rw = 0;
+    for (const peak of peaks) {
+      const cx = Math.round(peak.x * f), cy = Math.round(peak.y * f), cw = Math.round(peak.ww * f);
+      for (let sc = 0.70; sc <= 1.45; sc += 0.05) {
+        const ww = Math.round(cw * sc);
+        const wh = Math.round(ww / aspect);
+        if (ww < 16 || wh < 10 || ww > fine.width || wh > fine.height) continue;
+        for (let y = cy - 40; y <= cy + 40; y += 4) {
+          if (y < 0 || y + wh > fine.height) continue;
+          for (let x = cx - 40; x <= cx + 40; x += 4) {
+            if (x < 0 || x + ww > fine.width) continue;
+            descriptor(fine, x, y, ww, wh, FINE_DW, FDH, scratch);
+            const s = zncc(tF.v, tF.mean, tF.norm, scratch, nF);
+            if (s > refined) { refined = s; rx = x; ry = y; rw = ww; }
+          }
         }
       }
     }
@@ -1033,124 +1079,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     return best;
   }
 
-  // ---------- Leitura de data por OCR local (Tesseract.js) ----------
-  const TESSERACT_CDN = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
-  const MONTH_NAMES_LC = [
-    'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
-    'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'
-  ];
-
-  function isoOrNull(year, month, day) {
-    if (!(day >= 1 && day <= 31) || !(month >= 1 && month <= 12)) return null;
-    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-  }
-
-  // Relógio do Windows: sempre DD/MM/AAAA (ou DD/MM quando a barra está estreita).
-  // Só barra como separador — assim CNPJ ("54.488.977/0001-29") nunca vira data.
-  function parseClockDate(text, fallbackYear) {
-    let m = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/.exec(text);
-    if (m) return isoOrNull(Number(m[3]), Number(m[2]), Number(m[1]));
-    m = /\b(\d{1,2})\/(\d{1,2})\b/.exec(text);
-    if (m && fallbackYear) return isoOrNull(fallbackYear, Number(m[2]), Number(m[1]));
-    return null;
-  }
-
-  // Data no caminho da URL: .../2026/06/02/...
-  function parseUrlDates(text) {
-    const out = [];
-    const re = /\/(\d{4})\/(\d{2})\/(\d{2})(?:\/|\b)/g;
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      const iso = isoOrNull(Number(m[1]), Number(m[2]), Number(m[3]));
-      if (iso) out.push(iso);
-    }
-    return out;
-  }
-
-  // Byline de matéria: "3 de junho de 2026". Exigir o mês POR EXTENSO é o que
-  // descarta a data de emissão do timbrado ("08 DE JUL DE 2026"), sem heurística.
-  function parseArticleDates(text) {
-    const out = [];
-    const re = new RegExp(`\\b(\\d{1,2})\\s*(?:º)?\\s*de\\s+(${MONTH_NAMES_LC.join('|')})\\s+de\\s+(\\d{4})\\b`, 'gi');
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      const month = MONTH_NAMES_LC.indexOf(m[2].toLowerCase()) + 1;
-      const iso = isoOrNull(Number(m[3]), month, Number(m[1]));
-      if (iso) out.push(iso);
-    }
-    return out;
-  }
-
-  function loadScriptOnce(src) {
-    if (loadScriptOnce.cache && loadScriptOnce.cache[src]) return loadScriptOnce.cache[src];
-    loadScriptOnce.cache = loadScriptOnce.cache || {};
-    loadScriptOnce.cache[src] = new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = src;
-      s.onload = resolve;
-      s.onerror = () => reject(new Error('não foi possível carregar o motor de OCR'));
-      document.head.appendChild(s);
-    });
-    return loadScriptOnce.cache[src];
-  }
-
-  let ocrWorkerPromise = null;
-  function getOcrWorker() {
-    if (!ocrWorkerPromise) {
-      ocrWorkerPromise = (async () => {
-        await loadScriptOnce(TESSERACT_CDN);
-        return Tesseract.createWorker('por');
-      })();
-    }
-    return ocrWorkerPromise;
-  }
-
-  function cropCanvas(src, x, y, w, h, upscale = 1) {
-    const c = document.createElement('canvas');
-    c.width = Math.max(1, Math.round(w * upscale));
-    c.height = Math.max(1, Math.round(h * upscale));
-    const ctx = c.getContext('2d');
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(src, x, y, w, h, 0, 0, c.width, c.height);
-    return c;
-  }
-
-  async function ocrOf(canvas) {
-    const worker = await getOcrWorker();
-    const { data } = await worker.recognize(canvas);
-    return data.text || '';
-  }
-
-  // Mesma hierarquia de antes, agora aplicada sobre texto reconhecido localmente:
-  // relógio do sistema vence; sem ele, a data de matéria mais recente.
-  async function readDateLocally(pageCanvas) {
-    const W = pageCanvas.width, H = pageCanvas.height;
-    const year = state.year;
-
-    const clockCrop = cropCanvas(pageCanvas, Math.round(W * 0.60), Math.round(H * 0.90),
-                                 Math.round(W * 0.40), Math.round(H * 0.10), 2);
-    const clockIso = parseClockDate(await ocrOf(clockCrop), year);
-    releaseCanvas(clockCrop);
-    if (clockIso) return { iso: clockIso, source: 'relógio do sistema (OCR)' };
-
-    const urlCrop = cropCanvas(pageCanvas, Math.round(W * 0.05), 0,
-                               Math.round(W * 0.75), Math.round(H * 0.08), 2);
-    const urlDates = parseUrlDates(await ocrOf(urlCrop));
-    releaseCanvas(urlCrop);
-    if (urlDates.length) {
-      return { iso: urlDates.sort().pop(), source: 'data da matéria na URL (OCR)' };
-    }
-
-    const bodyCrop = cropCanvas(pageCanvas, 0, 0, W, H, Math.min(1, 1600 / W));
-    const articleDates = parseArticleDates(await ocrOf(bodyCrop));
-    releaseCanvas(bodyCrop);
-    if (articleDates.length) {
-      return { iso: articleDates.sort().pop(), source: 'data da matéria (OCR)' };
-    }
-    return null;
-  }
-
-  // ---------- Fallback de IA: só leitura de data, quando o OCR não encontra ----------
+  // ---------- Leitura de data pela IA (o banner é decidido localmente, por template) ----------
   async function analyzePageWithAi(pageCanvas) {
     const pageImage = canvasToApiImage(pageCanvas);
     const res = await fetch('/api/analyze', {
@@ -1296,33 +1225,35 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         const siteResult = state.results[siteIndex];
         const readings = []; // { page, iso } — para checar a ordem cronológica depois
 
-        for (let pageNumber = 1; pageNumber <= pdf.numPages && !stoppedForApiKey; pageNumber++) {
+        // Em série, cada chamada de ~5s à API bloqueia a próxima página. O render e o
+        // matching são CPU (não paralelizam em JS), mas a espera da rede sim: com um
+        // pool pequeno, o tempo total cai para perto do custo de CPU.
+        const analyzeOnePage = async (pageNumber) => {
+          if (stoppedForApiKey) return;
           let canvas = null;
           try {
             canvas = await renderPdfPage(pdf, pageNumber);
 
             const match = matchBanner(canvas);
             const scoreTxt = match.score >= 0 ? match.score.toFixed(2) : '—';
+            await sleep(0); // devolve o controle ao navegador depois do trecho pesado de CPU
 
-            let date = await readDateLocally(canvas);
-            let aiWarning = null;
-            if (!date) {
-              await waitForCooldown();
-              const ai = await analyzePageWithAi(canvas);
-              if (ai.date_found) date = { iso: ai.date_found, source: `${ai.date_source || 'IA'} (IA)` };
-              else aiWarning = ai.date_warning || null;
-            }
+            await waitForCooldown();
+            const ai = await analyzePageWithAi(canvas);
+            const date = ai.date_found
+              ? { iso: ai.date_found, source: ai.date_source || 'IA' }
+              : null;
 
             if (!date) {
-              const why = aiWarning ? ` (${aiWarning})` : '';
-              siteResult.extraNotes.push(`Página ${pageNumber}: nenhuma data legível encontrada, nem por OCR nem pela IA${why}.`);
-              continue;
+              const why = ai.date_warning ? ` (${ai.date_warning})` : '';
+              siteResult.extraNotes.push(`Página ${pageNumber}: nenhuma data legível encontrada na captura${why}.`);
+              return;
             }
 
             const day = parseIsoDateInMonth(date.iso, state.month, state.year);
             if (day === null) {
               siteResult.extraNotes.push(`Página ${pageNumber}: data extraída (${date.iso}) fora do mês/ano selecionado. Origem: ${date.source}.`);
-              continue;
+              return;
             }
 
             readings.push({ page: pageNumber, iso: date.iso });
@@ -1337,7 +1268,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
                 notes: `Dia ambíguo: páginas ${existing.page} e ${pageNumber} leram a mesma data.`,
                 page: existing.page
               });
-              continue;
+              return;
             }
 
             siteResult.days.set(day, {
@@ -1360,12 +1291,20 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
             state.progress.done++;
             updateProgressBar();
             renderAllSiteCards();
-            await sleep(0); // devolve o controle ao navegador: o matching e o OCR são pesados
+            await sleep(0);
           }
-        }
+        };
+
+        let cursor = 1;
+        await Promise.all(Array.from({ length: PAGE_CONCURRENCY }, async () => {
+          while (cursor <= pdf.numPages && !stoppedForApiKey) {
+            await analyzeOnePage(cursor++);
+          }
+        }));
 
         // A ordem cronológica é o padrão, mas não é garantida (o cliente pode trocar as
         // páginas). Por isso: aviso, nunca correção automática.
+        readings.sort((a, b) => a.page - b.page); // as páginas terminam fora de ordem no pool
         const outOfOrder = readings.some((r, i) => i > 0 && r.iso < readings[i - 1].iso);
         if (outOfOrder) {
           siteResult.extraNotes.push('As datas lidas não estão em ordem crescente entre as páginas. Isso pode ser só a ordem do PDF, ou uma data lida errada — vale conferir.');
