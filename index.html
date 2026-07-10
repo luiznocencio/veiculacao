@@ -574,6 +574,52 @@
   .btn.active-approve { border-color: var(--color-success); color: var(--color-success); background: var(--status-ok-bg); }
   .btn.active-reject { border-color: var(--color-danger); color: var(--color-danger); background: var(--status-bad-bg); }
   .modal-hint { font-size: var(--text-label-sm); color: var(--text-subtle); margin-top: var(--space-small); }
+  .modal-thumb { cursor: zoom-in; }
+  .modal-thumb-hint {
+    font-size: var(--text-label-sm);
+    color: var(--text-subtle);
+    text-align: center;
+    margin: calc(-1 * var(--space-xsmall)) 0 var(--space-medium);
+  }
+
+  /* Lightbox: o print em tela cheia, acima do modal. */
+  .lightbox {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.88);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-medium);
+    z-index: 60;
+    cursor: zoom-out;
+  }
+  .lightbox.open { display: flex; }
+  .lightbox img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: var(--radius-sm);
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+  }
+  .lightbox-close {
+    position: absolute;
+    top: var(--space-medium);
+    right: var(--space-medium);
+    width: var(--control-sm);
+    height: var(--control-sm);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: var(--radius-sm);
+    color: #fff;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .lightbox-close:hover { background: rgba(0, 0, 0, 0.75); }
 </style>
 </head>
 <body>
@@ -637,6 +683,11 @@
 
 <div class="modal-backdrop" id="reviewModal" role="dialog" aria-modal="true">
   <div class="modal" id="reviewModalBox"></div>
+</div>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true">
+  <button type="button" class="lightbox-close" id="lightboxClose" aria-label="Fechar">×</button>
+  <img id="lightboxImg" alt="Print em tela cheia">
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -708,7 +759,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     progressFill: document.getElementById('progressFill'),
     results: document.getElementById('results'),
     reviewModal: document.getElementById('reviewModal'),
-    reviewModalBox: document.getElementById('reviewModalBox')
+    reviewModalBox: document.getElementById('reviewModalBox'),
+    lightbox: document.getElementById('lightbox'),
+    lightboxImg: document.getElementById('lightboxImg'),
+    lightboxClose: document.getElementById('lightboxClose')
   };
 
   function showApiErrorBanner(message) {
@@ -965,10 +1019,11 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     canvas.height = 0;
   }
 
-  // Miniatura guardada por página para a revisão humana: o auditor precisa VER o print
-  // ao decidir. ~480px cobre bem o banner e a maioria das datas; o PDF original fica para
-  // inspeção fina. JPEG 0.72 mantém o custo de memória baixo mesmo com 20 PDFs.
-  const THUMB_LONG_EDGE = 480;
+  // Imagem do print guardada por página para a revisão humana: o auditor precisa VER o
+  // print ao decidir, e poder ampliá-lo em tela cheia para ler datas e conferir o banner.
+  // 1280px no lado maior serve bem tanto o preview do modal (~500px) quanto o zoom cheio;
+  // JPEG 0.72 segura o custo de memória mesmo com muitos PDFs.
+  const THUMB_LONG_EDGE = 1280;
   function canvasToThumb(canvas) {
     const longEdge = Math.max(canvas.width, canvas.height);
     const scale = Math.min(1, THUMB_LONG_EDGE / longEdge);
@@ -1412,6 +1467,16 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     el.reviewModal.classList.remove('open');
   }
 
+  function openLightbox(src) {
+    if (!src) return;
+    el.lightboxImg.src = src;
+    el.lightbox.classList.add('open');
+  }
+  function closeLightbox() {
+    el.lightbox.classList.remove('open');
+    el.lightboxImg.removeAttribute('src'); // libera a imagem grande da memória
+  }
+
   function renderReviewModal(info) {
     const site = state.results[reviewCtx.siteIndex];
     const v = info.verdict || { banner: 'uncertain', confidence: 'medium', reason: '' };
@@ -1451,7 +1516,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         </div>
         <button type="button" class="modal-close" data-action="close" aria-label="Fechar">×</button>
       </div>
-      <img class="modal-thumb" src="${info.thumb}" alt="Print da página ${info.page}">
+      <img class="modal-thumb" src="${info.thumb}" alt="Print da página ${info.page}" data-action="zoom" title="Clique para ampliar em tela cheia">
+      <div class="modal-thumb-hint">🔍 clique na imagem para ampliar</div>
       <div class="modal-row"><span class="k">Banner</span><span class="v"><span class="vpill ${v.banner}">${bannerLabel(v)}</span> &nbsp;${escapeHtml(v.reason || '')}</span></div>
       <div class="modal-row"><span class="k">Template</span><span class="v">similaridade ${scoreTxt} (limiar ${BANNER_MATCH_THRESHOLD})</span></div>
       <div class="modal-row"><span class="k">2ª opinião IA</span><span class="v">${aiTxt}${info.aiBannerNotes ? ' — ' + escapeHtml(info.aiBannerNotes) : ''}</span></div>
@@ -1483,6 +1549,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     if (!btn) return;
     const action = btn.dataset.action;
     if (action === 'close') closeReview();
+    else if (action === 'zoom') openLightbox(btn.getAttribute('src'));
     else if (action === 'approve') applyOverride('approved');
     else if (action === 'reject') applyOverride('rejected');
     else if (action === 'auto') applyOverride(null);
@@ -1491,8 +1558,14 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   el.reviewModal.addEventListener('click', (e) => {
     if (e.target === el.reviewModal) closeReview(); // clique no fundo fecha
   });
+  // Qualquer clique no lightbox (fundo, imagem ou botão) fecha — cursor já é zoom-out.
+  el.lightbox.addEventListener('click', closeLightbox);
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && el.reviewModal.classList.contains('open')) closeReview();
+    if (e.key !== 'Escape') return;
+    // O lightbox fica por cima: se estiver aberto, o Esc fecha só ele, mantendo o modal.
+    if (el.lightbox.classList.contains('open')) closeLightbox();
+    else if (el.reviewModal.classList.contains('open')) closeReview();
   });
 
   // ---------- Main orchestrator ----------
