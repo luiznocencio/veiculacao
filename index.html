@@ -848,7 +848,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   const API_LONG_EDGE = 1568; // só para o fallback de IA
   const MAX_RENDER_SCALE = 4;
   const PAGE_JPEG_QUALITY = 0.9;
-  const PAGE_CONCURRENCY = 3; // sobrepõe a espera de rede; a CPU segue serializada
+  const PAGE_CONCURRENCY = 2; // sobrepõe a espera de rede; a CPU segue serializada
+  const MAX_PAGE_ATTEMPTS = 4; // tentativas por página antes de desistir por rate limit
 
   async function renderPdfPage(pdf, pageNumber) {
     const page = await pdf.getPage(pageNumber);
@@ -888,10 +889,13 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   // busca grosseira barata para achar o pico, refino em alta resolução ao redor dele.
   // Parâmetros calibrados contra controles reais: positivos ficaram em 0,90–0,93 e
   // negativos (páginas do mesmo portal, sem o banner) em no máximo 0,78.
-  const BANNER_MATCH_THRESHOLD = 0.85;
-  const COARSE_W = 300, COARSE_DW = 16;
+  // Limiar no ponto médio entre o menor positivo (0,88) e o maior negativo (0,78)
+  // medidos nos controles reais, com as duas criações (quadrada e faixa 9,9:1).
+  const BANNER_MATCH_THRESHOLD = 0.83;
+  const COARSE_W = 300, COARSE_DW = 24;
   const FINE_W = 1600, FINE_DW = 64;
   const COARSE_PEAKS = 4; // quantos picos grosseiros distintos merecem refino
+  const MIN_WINDOW_PX = 4; // banners largos (9,9:1) têm janelas de poucos pixels de altura
 
   // Reduzir de ~1900px para 300px numa única chamada de drawImage produz aliasing:
   // o canvas não faz média de área em saltos grandes, e a busca grosseira passa a
@@ -987,8 +991,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   function matchSingleRef(coarse, fine, refEl) {
     const aspect = refEl.naturalWidth / refEl.naturalHeight;
 
-    const CDH = Math.max(8, Math.round(COARSE_DW / aspect));
-    const FDH0 = Math.max(10, Math.round(FINE_DW / aspect));
+    const CDH = Math.max(6, Math.round(COARSE_DW / aspect));
+    const FDH0 = Math.max(6, Math.round(FINE_DW / aspect));
     // banners verticais (aspecto < 1) geram descritores altos — dimensionar pelo maior
     const scratch = new Float64Array(Math.max(COARSE_DW * CDH, FINE_DW * FDH0) * 3);
 
@@ -999,10 +1003,13 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     for (let r = 0.06; r <= 0.70; r *= 1.12) {
       const ww = Math.round(coarse.width * r);
       const wh = Math.round(ww / aspect);
-      if (ww < 16 || wh < 10 || ww > coarse.width || wh > coarse.height) continue;
-      const step = Math.max(2, (ww / 6) | 0);
-      for (let y = 0; y + wh <= coarse.height; y += step) {
-        for (let x = 0; x + ww <= coarse.width; x += step) {
+      if (ww < 16 || wh < MIN_WINDOW_PX || ww > coarse.width || wh > coarse.height) continue;
+      // O passo vertical precisa vir da ALTURA da janela: num banner 9,9:1 a janela tem
+      // ~6px de altura, e um passo derivado da largura (~10px) nunca cai sobre a faixa.
+      const stepX = Math.max(2, (ww / 6) | 0);
+      const stepY = Math.max(1, (wh / 3) | 0);
+      for (let y = 0; y + wh <= coarse.height; y += stepY) {
+        for (let x = 0; x + ww <= coarse.width; x += stepX) {
           descriptor(coarse, x, y, ww, wh, COARSE_DW, CDH, scratch);
           const s = zncc(tC.v, tC.mean, tC.norm, scratch, nC);
           if (s > 0) candidates.push({ s, x, y, ww });
@@ -1037,8 +1044,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
       for (let sc = 0.70; sc <= 1.45; sc += 0.05) {
         const ww = Math.round(cw * sc);
         const wh = Math.round(ww / aspect);
-        if (ww < 16 || wh < 10 || ww > fine.width || wh > fine.height) continue;
-        for (let y = cy - 40; y <= cy + 40; y += 4) {
+        if (ww < 16 || wh < MIN_WINDOW_PX || ww > fine.width || wh > fine.height) continue;
+        for (let y = cy - 40; y <= cy + 40; y += 2) {
           if (y < 0 || y + wh > fine.height) continue;
           for (let x = cx - 40; x <= cx + 40; x += 4) {
             if (x < 0 || x + ww > fine.width) continue;
@@ -1228,9 +1235,11 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         // Em série, cada chamada de ~5s à API bloqueia a próxima página. O render e o
         // matching são CPU (não paralelizam em JS), mas a espera da rede sim: com um
         // pool pequeno, o tempo total cai para perto do custo de CPU.
-        const analyzeOnePage = async (pageNumber) => {
+        const pending = []; // páginas que bateram rate limit e merecem nova tentativa
+        const analyzeOnePage = async (pageNumber, attempt = 1) => {
           if (stoppedForApiKey) return;
           let canvas = null;
+          let requeued = false;
           try {
             canvas = await renderPdfPage(pdf, pageNumber);
 
@@ -1281,16 +1290,25 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
               stoppedForApiKey = true;
               showApiErrorBanner(err.message);
             } else if (err instanceof RateLimitError) {
+              // Descartar a página aqui perde o dia inteiro em silêncio. Esperar o
+              // cooldown e tentar de novo é o único comportamento correto.
               noteRateLimited(err.retryAfterMs);
-              siteResult.extraNotes.push(`Página ${pageNumber}: limite de taxa da API — página não analisada.`);
+              if (attempt <= MAX_PAGE_ATTEMPTS) {
+                pending.push({ pageNumber, attempt: attempt + 1 });
+                requeued = true;
+              } else {
+                siteResult.extraNotes.push(`Página ${pageNumber}: limite de taxa da API persistente após ${attempt} tentativas — página não analisada.`);
+              }
             } else {
               siteResult.extraNotes.push(`Página ${pageNumber}: ${err.message}`);
             }
           } finally {
             if (canvas) releaseCanvas(canvas);
-            state.progress.done++;
-            updateProgressBar();
-            renderAllSiteCards();
+            if (!requeued) {
+              state.progress.done++;
+              updateProgressBar();
+              renderAllSiteCards();
+            }
             await sleep(0);
           }
         };
@@ -1301,6 +1319,16 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
             await analyzeOnePage(cursor++);
           }
         }));
+
+        // Reprocessa, sem concorrência, o que bateu rate limit. O cooldown compartilhado
+        // já segura o ritmo; insistir em paralelo só provocaria novos 429.
+        while (pending.length && !stoppedForApiKey) {
+          const batch = pending.splice(0, pending.length);
+          for (const item of batch) {
+            if (stoppedForApiKey) break;
+            await analyzeOnePage(item.pageNumber, item.attempt);
+          }
+        }
 
         // A ordem cronológica é o padrão, mas não é garantida (o cliente pode trocar as
         // páginas). Por isso: aviso, nunca correção automática.

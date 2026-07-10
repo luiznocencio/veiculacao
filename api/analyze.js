@@ -144,6 +144,16 @@ function isoOrNull(year, month, day) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+// O modelo às vezes devolve a STRING "null" em vez do null do JSON. Como string é
+// truthy, isso fazia o código concluir "há um relógio, mas ilegível" e recusar a data
+// da matéria — descartando páginas cuja data estava perfeitamente visível.
+function cleanText(value) {
+  if (typeof value !== 'string') return value || null;
+  const t = value.trim();
+  if (!t || /^(null|none|nenhum[ao]?|n\/a|-|--)$/i.test(t)) return null;
+  return t;
+}
+
 // A conversão fica em código, não no modelo: ele lê os dígitos bem, mas erra a
 // conversão estruturada (ex: "01/06/2026" virando "2026-01-01") e às vezes trunca
 // o ano ("11/06"). fallbackYear (o ano auditado) só é usado quando falta o ano.
@@ -184,15 +194,21 @@ function dateTextToIso(dateText, fallbackYear) {
 // costuma ser de notícia antiga e produziria um dia verde errado.
 function resolveDate(parsed, period) {
   const fallbackYear = period ? period.year : null;
-  const fromClock = dateTextToIso(parsed.clock_date_text, fallbackYear);
+  const clockText = cleanText(parsed.clock_date_text);
+  const articleText = cleanText(parsed.article_date_text);
+
+  const fromClock = dateTextToIso(clockText, fallbackYear);
   if (fromClock) return { date_found: fromClock, date_source: 'relógio do sistema' };
-  if (parsed.clock_date_text) {
+
+  const fromArticle = dateTextToIso(articleText, fallbackYear);
+  if (clockText) {
+    // Relógio presente mas ilegível: a data da matéria costuma ser de notícia antiga,
+    // então usá-la produziria um dia verde errado. Melhor pendência para revisão.
     return {
       date_found: null,
-      date_warning: `relógio do sistema detectado ("${parsed.clock_date_text}") mas ilegível/incompleto`
+      date_warning: `relógio do sistema detectado ("${clockText}") mas ilegível/incompleto`
     };
   }
-  const fromArticle = dateTextToIso(parsed.article_date_text, fallbackYear);
   if (fromArticle) return { date_found: fromArticle, date_source: 'data da matéria' };
   return { date_found: null };
 }
@@ -287,8 +303,8 @@ module.exports = async function handler(req, res) {
     const parsed = parseModelJson(rawText);
     const resolved = resolveDate(parsed, validPeriod);
     res.status(200).json({
-      clock_date_text: parsed.clock_date_text || null,
-      article_date_text: parsed.article_date_text || null,
+      clock_date_text: cleanText(parsed.clock_date_text),
+      article_date_text: cleanText(parsed.article_date_text),
       notes: parsed.notes || '',
       ...resolved
     });
