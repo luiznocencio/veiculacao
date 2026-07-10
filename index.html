@@ -6,78 +6,216 @@
 <title>Verificador de Veiculação de Banners</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  // Aplica o tema antes da primeira pintura, senão a página pisca no tema errado.
+  (function () {
+    var saved = localStorage.getItem('bannerAudit.theme');
+    var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+  })();
+</script>
 <style>
+  /* ============================================================
+     Design system Disrupy — tokens copiados do projeto Claude Design
+     (tokens/colors.css, scales.css, typography.css, base.css).
+     ============================================================ */
   :root {
-    --bg: #12151A;
-    --panel: #1B1F27;
-    --panel-2: #20242E;
-    --line: #2A2F3A;
-    --text: #E7E9EE;
-    --text-dim: #8B93A3;
-    --accent: #4C8DFF;
-    --ok: #3DD68C;
-    --ok-bg: rgba(61,214,140,.12);
-    --warn: #F5A623;
-    --warn-bg: rgba(245,166,35,.12);
-    --bad: #FF5C6C;
-    --bad-bg: rgba(255,92,108,.12);
+    /* Marca */
+    --color-brand: rgb(45, 95, 255);
+    --color-brand-hover: rgb(89, 140, 255);
+    --color-brand-pressed: rgb(30, 74, 214);
+    --color-brand-soft: rgb(238, 244, 255);
+
+    /* Superfícies e texto (tema claro, padrão do DS) */
+    --surface-page: rgb(246, 246, 247);
+    --surface-card: rgb(255, 255, 255);
+    --surface-sunken: rgb(239, 243, 248);
+    --text-strong: rgb(0, 0, 0);
+    --text-default: rgb(49, 50, 53);
+    --text-muted: rgb(84, 85, 91);
+    --text-subtle: rgb(155, 158, 169);
+    --text-on-brand: rgb(255, 255, 255);
+
+    /* Bordas */
+    --border-default: rgb(223, 231, 239);
+    --border-strong: rgb(201, 204, 212);
+
+    /* Semânticas */
+    --color-success: rgb(84, 167, 88);
+    --color-warning: rgb(235, 143, 21);
+    --color-danger: rgb(217, 58, 48);
+
+    /* Tokens de aplicação: o bloco dark do DS não redefine os *-soft nem
+       --surface-sunken (são quase brancos), então derivamos aqui por tema. */
+    --status-ok-bg: rgb(243, 250, 243);
+    --status-warn-bg: rgb(254, 250, 236);
+    --status-bad-bg: rgb(254, 243, 242);
+    --surface-input: rgb(255, 255, 255);
+
+    /* Escalas */
+    --space-quark: 4px;
+    --space-xsmall: 8px;
+    --space-small: 12px;
+    --space-medium: 16px;
+    --space-xlarge: 20px;
+    --space-xxlarge: 24px;
+    --space-3xl: 32px;
+    --space-4xl: 40px;
+    --radius-sm: 4px;
+    --radius-lg: 8px;
+    --radius-pill: 999px;
+    --shadow-sm: 0 1px 3px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.04);
+    --focus-ring: 0 0 0 3px rgba(45, 95, 255, 0.32);
+    --duration-fast: 140ms;
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+    --control-sm: 32px;
+    --control-md: 44px;
+
+    /* Tipografia */
+    --font-body: "Poppins", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    --fw-medium: 500;
+    --fw-semibold: 600;
+    --text-title-sm: 20px;
+    --text-body-md: 16px;
+    --text-body-sm: 14px;
+    --text-label-md: 13px;
+    --text-label-sm: 12px;
+    --lh-body-md: 1.5;
+    --tracking-caps: 0.08em;
   }
+
+  :root[data-theme="dark"] {
+    --surface-page: rgb(49, 50, 53);
+    --surface-card: rgb(0, 0, 0);
+    --surface-sunken: rgba(255, 255, 255, 0.06);
+    --text-strong: rgb(255, 255, 255);
+    --text-default: rgb(246, 246, 247);
+    --text-muted: rgb(201, 204, 212);
+    --text-subtle: rgb(155, 158, 169);
+    --border-default: rgba(255, 255, 255, 0.12);
+    --border-strong: rgba(255, 255, 255, 0.2);
+    --color-brand-soft: rgba(45, 95, 255, 0.16);
+    /* valencia-500 do DS: o danger padrão (valencia-600) fica ~3.4:1 sobre o card
+       preto, abaixo do mínimo AA; este chega a ~4.4:1 com a mesma paleta. */
+    --color-danger: rgb(235, 82, 72);
+    --status-ok-bg: rgba(84, 167, 88, 0.16);
+    --status-warn-bg: rgba(235, 143, 21, 0.16);
+    --status-bad-bg: rgba(235, 82, 72, 0.16);
+    --surface-input: rgba(255, 255, 255, 0.04);
+  }
+
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: 'IBM Plex Sans', sans-serif;
-    line-height: 1.5;
+    background: var(--surface-page);
+    color: var(--text-default);
+    font-family: var(--font-body);
+    font-size: var(--text-body-md);
+    line-height: var(--lh-body-md);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    transition: background var(--duration-fast) var(--ease-standard);
   }
-  code, .mono, input, select, .badge, .day-cell, .progress-label {
-    font-family: 'IBM Plex Mono', monospace;
+  code, .mono, .day-cell, .progress-label {
+    font-family: var(--font-mono);
+  }
+  *:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+    border-radius: var(--radius-sm);
   }
   header {
-    padding: 28px 32px 16px;
-    border-bottom: 1px solid var(--line);
+    padding: var(--space-3xl) var(--space-3xl) var(--space-xlarge);
+    border-bottom: 1px solid var(--border-default);
+    background: var(--surface-card);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-medium);
+    flex-wrap: wrap;
   }
   header h1 {
-    margin: 0 0 6px;
-    font-size: 22px;
-    font-weight: 600;
+    margin: 0 0 var(--space-quark);
+    font-size: var(--text-title-sm);
+    font-weight: var(--fw-semibold);
+    color: var(--text-strong);
+    letter-spacing: -0.01em;
   }
   header p {
     margin: 0;
-    color: var(--text-dim);
-    font-size: 14px;
+    color: var(--text-muted);
+    font-size: var(--text-body-sm);
+    max-width: 70ch;
   }
+  .theme-toggle {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xsmall);
+    height: var(--control-sm);
+    padding: 0 var(--space-small);
+    background: transparent;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: var(--text-label-md);
+    font-weight: var(--fw-medium);
+    cursor: pointer;
+    transition: border-color var(--duration-fast) var(--ease-standard),
+                color var(--duration-fast) var(--ease-standard);
+  }
+  .theme-toggle:hover { border-color: var(--color-brand); color: var(--color-brand); }
   main {
     max-width: 1100px;
     margin: 0 auto;
-    padding: 24px 32px 64px;
+    padding: var(--space-3xl) var(--space-3xl) 64px;
   }
+  /* Card do DS: superfície branca arredondada com overline de acento no cabeçalho */
   .panel {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 20px;
-    margin-bottom: 24px;
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    padding: var(--space-xxlarge);
+    margin-bottom: var(--space-xxlarge);
   }
   .panel h2 {
-    margin: 0 0 16px;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
+    margin: 0 0 var(--space-xlarge);
+    padding-left: var(--space-small);
+    position: relative;
+    font-size: var(--text-label-md);
+    font-weight: var(--fw-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-caps);
+    color: var(--text-muted);
+  }
+  .panel h2::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 1em;
+    border-radius: var(--radius-pill);
+    background: var(--color-brand);
   }
   .field {
-    margin-bottom: 18px;
+    margin-bottom: var(--space-medium);
   }
   .field label {
     display: block;
-    font-size: 13px;
-    color: var(--text-dim);
-    margin-bottom: 6px;
+    font-size: var(--text-label-md);
+    color: var(--text-muted);
+    font-weight: var(--fw-medium);
+    margin-bottom: var(--space-xsmall);
   }
   .row {
     display: flex;
-    gap: 16px;
+    gap: var(--space-medium);
     flex-wrap: wrap;
   }
   .row .field {
@@ -86,54 +224,85 @@
   }
   input[type="text"], select {
     width: 100%;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    color: var(--text);
-    padding: 9px 12px;
-    border-radius: 8px;
-    font-size: 13px;
-  }
-  input:focus, select:focus { outline: 1px solid var(--accent); }
-  .btn {
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    color: var(--text);
-    padding: 9px 14px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 13px;
+    height: var(--control-md);
+    background: var(--surface-input);
+    border: 1px solid var(--border-default);
+    color: var(--text-default);
+    padding: 0 var(--space-small);
+    border-radius: var(--radius-sm);
     font-family: inherit;
+    font-size: var(--text-body-sm);
+    transition: border-color var(--duration-fast) var(--ease-standard);
   }
-  .btn:hover { border-color: var(--accent); }
+  input:hover, select:hover { border-color: var(--color-brand-hover); }
+  /* Button variant="outlined" */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--control-sm);
+    background: transparent;
+    border: 1px solid var(--border-default);
+    color: var(--text-default);
+    padding: 0 var(--space-medium);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: var(--text-label-md);
+    font-weight: var(--fw-medium);
+    font-family: inherit;
+    transition: border-color var(--duration-fast) var(--ease-standard),
+                color var(--duration-fast) var(--ease-standard);
+  }
+  .btn:hover { border-color: var(--color-brand); color: var(--color-brand); }
+  /* Button variant="filled", size="large" (44px) */
   .btn-primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-    font-weight: 600;
-    padding: 11px 20px;
+    background: var(--color-brand);
+    border-color: var(--color-brand);
+    color: var(--text-on-brand);
+    font-weight: var(--fw-semibold);
+    font-size: var(--text-body-sm);
+    height: var(--control-md);
+    padding: 0 var(--space-xxlarge);
+    transition: background var(--duration-fast) var(--ease-standard);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--color-brand-hover);
+    border-color: var(--color-brand-hover);
+    color: var(--text-on-brand);
+  }
+  .btn-primary:active:not(:disabled) {
+    background: var(--color-brand-pressed);
+    border-color: var(--color-brand-pressed);
   }
   .btn-primary:disabled {
-    opacity: .5;
+    opacity: .4;
     cursor: not-allowed;
   }
   .status-msg {
-    font-size: 12px;
-    margin-top: 6px;
-    color: var(--text-dim);
+    font-size: var(--text-label-sm);
+    margin-top: var(--space-xsmall);
+    color: var(--text-subtle);
   }
-  .status-msg.error { color: var(--bad); }
-  .status-msg.success { color: var(--ok); }
+  .status-msg.error { color: var(--color-danger); }
+  .status-msg.success { color: var(--color-success); }
   .upload-zone {
-    border: 1px dashed var(--line);
-    border-radius: 8px;
-    padding: 14px;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-lg);
+    padding: var(--space-xlarge);
     text-align: center;
-    color: var(--text-dim);
-    font-size: 13px;
+    background: var(--surface-sunken);
+    color: var(--text-muted);
+    font-size: var(--text-body-sm);
     cursor: pointer;
     position: relative;
+    transition: border-color var(--duration-fast) var(--ease-standard),
+                background var(--duration-fast) var(--ease-standard);
   }
-  .upload-zone:hover, .upload-zone.dragover { border-color: var(--accent); color: var(--text); }
+  .upload-zone:hover, .upload-zone.dragover {
+    border-color: var(--color-brand);
+    background: var(--color-brand-soft);
+    color: var(--text-default);
+  }
   .upload-zone input[type="file"] {
     position: absolute;
     inset: 0;
@@ -143,34 +312,36 @@
   .chiplist {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 10px;
+    gap: var(--space-xsmall);
+    margin-top: var(--space-small);
   }
+  /* Pill do DS */
   .chip {
     display: flex;
     align-items: center;
-    gap: 8px;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 6px 8px 6px 6px;
-    font-size: 12px;
+    gap: var(--space-xsmall);
+    background: var(--surface-sunken);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-pill);
+    padding: var(--space-quark) var(--space-small) var(--space-quark) var(--space-quark);
+    font-size: var(--text-label-sm);
+    color: var(--text-default);
   }
   .chip img {
     width: 24px;
     height: 24px;
     object-fit: cover;
-    border-radius: 4px;
+    border-radius: var(--radius-pill);
   }
   .chip .doc-icon {
     width: 24px;
     height: 24px;
-    border-radius: 4px;
-    background: var(--line);
+    border-radius: var(--radius-pill);
+    background: var(--color-brand-soft);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 13px;
+    font-size: var(--text-label-md);
   }
   .chip .name {
     max-width: 160px;
@@ -181,18 +352,18 @@
   .chip .remove {
     background: none;
     border: none;
-    color: var(--text-dim);
+    color: var(--text-subtle);
     cursor: pointer;
     font-size: 15px;
     line-height: 1;
     padding: 2px;
   }
-  .chip .remove:hover { color: var(--bad); }
+  .chip .remove:hover { color: var(--color-danger); }
   .run-row {
     display: flex;
     align-items: center;
-    gap: 16px;
-    margin-top: 20px;
+    gap: var(--space-medium);
+    margin-top: var(--space-xlarge);
   }
   .progress-wrap {
     flex: 1;
@@ -200,39 +371,41 @@
   }
   .progress-wrap.visible { display: block; }
   .progress-label {
-    font-size: 12px;
-    color: var(--text-dim);
-    margin-bottom: 6px;
+    font-size: var(--text-label-sm);
+    color: var(--text-muted);
+    margin-bottom: var(--space-xsmall);
   }
   .progress-bar-bg {
-    background: var(--panel-2);
-    border-radius: 6px;
+    background: var(--surface-sunken);
+    border-radius: var(--radius-pill);
     height: 8px;
     overflow: hidden;
   }
   .progress-bar-fill {
-    background: var(--accent);
+    background: var(--color-brand);
     height: 100%;
     width: 0%;
-    transition: width .2s ease;
+    border-radius: var(--radius-pill);
+    transition: width .2s var(--ease-standard);
   }
   .banner-error {
-    background: var(--bad-bg);
-    border: 1px solid var(--bad);
-    color: var(--bad);
-    border-radius: 8px;
-    padding: 12px 14px;
-    font-size: 13px;
-    margin-bottom: 20px;
+    background: var(--status-bad-bg);
+    border: 1px solid var(--color-danger);
+    color: var(--color-danger);
+    border-radius: var(--radius-lg);
+    padding: var(--space-small) var(--space-medium);
+    font-size: var(--text-body-sm);
+    margin-bottom: var(--space-xlarge);
     display: none;
   }
   .banner-error.visible { display: block; }
-  #results { display: flex; flex-direction: column; gap: 16px; }
+  #results { display: flex; flex-direction: column; gap: var(--space-medium); }
   .site-card {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 18px 20px;
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    padding: var(--space-xlarge) var(--space-xxlarge);
   }
   .site-card-header {
     display: flex;
@@ -243,77 +416,84 @@
     margin-bottom: 12px;
   }
   .site-card-title {
-    font-size: 15px;
-    font-weight: 600;
+    font-size: var(--text-body-md);
+    font-weight: var(--fw-semibold);
+    color: var(--text-strong);
   }
   .site-card-sub {
-    font-size: 12px;
-    color: var(--text-dim);
+    font-size: var(--text-label-sm);
+    color: var(--text-subtle);
     margin-top: 2px;
   }
-  .badges { display: flex; gap: 8px; }
+  .badges { display: flex; gap: var(--space-xsmall); }
+  /* Pill do DS */
   .badge {
-    font-size: 12px;
-    padding: 4px 9px;
-    border-radius: 999px;
-    font-weight: 600;
+    font-size: var(--text-label-sm);
+    padding: var(--space-quark) var(--space-small);
+    border-radius: var(--radius-pill);
+    font-weight: var(--fw-semibold);
   }
-  .badge.ok { background: var(--ok-bg); color: var(--ok); }
-  .badge.warn { background: var(--warn-bg); color: var(--warn); }
-  .badge.bad { background: var(--bad-bg); color: var(--bad); }
+  .badge.ok { background: var(--status-ok-bg); color: var(--color-success); }
+  .badge.warn { background: var(--status-warn-bg); color: var(--color-warning); }
+  .badge.bad { background: var(--status-bad-bg); color: var(--color-danger); }
   .day-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
-    gap: 6px;
-    margin-bottom: 10px;
+    gap: var(--space-quark);
+    margin-bottom: var(--space-small);
   }
   .day-cell {
     min-height: 34px;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
-    background: var(--panel-2);
-    color: var(--text-dim);
+    font-size: var(--text-label-sm);
+    font-weight: var(--fw-medium);
+    background: var(--surface-sunken);
+    color: var(--text-subtle);
     cursor: default;
     position: relative;
   }
   .day-cell[title]:hover::after { content: none; }
-  .day-cell.ok { background: var(--ok-bg); color: var(--ok); }
-  .day-cell.problem { background: var(--warn-bg); color: var(--warn); }
-  .day-cell.missing { background: var(--bad-bg); color: var(--bad); }
+  .day-cell.ok { background: var(--status-ok-bg); color: var(--color-success); }
+  .day-cell.problem { background: var(--status-warn-bg); color: var(--color-warning); }
+  .day-cell.missing { background: var(--status-bad-bg); color: var(--color-danger); }
   .legend {
     display: flex;
-    gap: 14px;
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-bottom: 8px;
+    gap: var(--space-medium);
+    font-size: var(--text-label-sm);
+    color: var(--text-subtle);
+    margin-bottom: var(--space-small);
     flex-wrap: wrap;
   }
-  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend span { display: inline-flex; align-items: center; gap: var(--space-quark); }
   .legend .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .notes-log {
-    font-size: 12px;
-    color: var(--text-dim);
-    border-top: 1px solid var(--line);
-    padding-top: 10px;
-    margin-top: 4px;
+    font-size: var(--text-label-sm);
+    color: var(--text-muted);
+    border-top: 1px solid var(--border-default);
+    padding-top: var(--space-small);
+    margin-top: var(--space-quark);
   }
-  .notes-log ul { margin: 6px 0 0; padding-left: 18px; }
-  .notes-log li { margin-bottom: 4px; }
+  .notes-log strong { color: var(--text-default); font-weight: var(--fw-semibold); }
+  .notes-log ul { margin: var(--space-xsmall) 0 0; padding-left: 18px; }
+  .notes-log li { margin-bottom: var(--space-quark); }
   .empty-hint {
-    color: var(--text-dim);
-    font-size: 13px;
+    color: var(--text-subtle);
+    font-size: var(--text-body-sm);
     text-align: center;
-    padding: 30px 0;
+    padding: var(--space-4xl) 0;
   }
 </style>
 </head>
 <body>
 <header>
-  <h1>Verificador de Veiculação de Banners</h1>
-  <p>Confira automaticamente se os comprovantes em PDF de cada site cobrem todos os dias do mês, com o banner correto no ar e a data legível.</p>
+  <div>
+    <h1>Verificador de Veiculação de Banners</h1>
+    <p>Confira automaticamente se os comprovantes em PDF de cada site cobrem todos os dias do mês, com o banner correto no ar e a data legível.</p>
+  </div>
+  <button class="theme-toggle" id="themeToggle" type="button" aria-label="Alternar tema"></button>
 </header>
 
 <main>
@@ -784,10 +964,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
           </div>
         </div>
         <div class="legend">
-          <span><span class="dot" style="background:var(--ok)"></span>Ok</span>
-          <span><span class="dot" style="background:var(--warn)"></span>Problema</span>
-          <span><span class="dot" style="background:var(--bad)"></span>Faltando</span>
-          <span><span class="dot" style="background:var(--panel-2);border:1px solid var(--line)"></span>Pendente</span>
+          <span><span class="dot" style="background:var(--color-success)"></span>Ok</span>
+          <span><span class="dot" style="background:var(--color-warning)"></span>Problema</span>
+          <span><span class="dot" style="background:var(--color-danger)"></span>Faltando</span>
+          <span><span class="dot" style="background:var(--surface-sunken);border:1px solid var(--border-default)"></span>Pendente</span>
         </div>
         <div class="day-grid">${cells.join('')}</div>
         ${notesHtml}
@@ -937,8 +1117,31 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     }
   }
 
+  // ---------- Alternância de tema (tokens claro/escuro da Disrupy) ----------
+  const themeToggleBtn = document.getElementById('themeToggle');
+
+  function isDarkTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'dark';
+  }
+
+  function syncThemeToggleLabel() {
+    themeToggleBtn.textContent = isDarkTheme() ? '☀ Tema claro' : '☾ Tema escuro';
+  }
+
+  themeToggleBtn.addEventListener('click', () => {
+    const nextDark = !isDarkTheme();
+    if (nextDark) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+    localStorage.setItem('bannerAudit.theme', nextDark ? 'dark' : 'light');
+    syncThemeToggleLabel();
+  });
+
   // ---------- Boot ----------
   localStorage.removeItem('bannerAudit.apiKey'); // limpeza de chave da versão anterior (Anthropic client-side)
+  syncThemeToggleLabel();
   populateMonthYearSelectors();
 })();
 </script>
