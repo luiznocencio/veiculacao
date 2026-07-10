@@ -889,13 +889,22 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   // busca grosseira barata para achar o pico, refino em alta resolução ao redor dele.
   // Parâmetros calibrados contra controles reais: positivos ficaram em 0,90–0,93 e
   // negativos (páginas do mesmo portal, sem o banner) em no máximo 0,78.
-  // Limiar no ponto médio entre o menor positivo (0,88) e o maior negativo (0,78)
-  // medidos nos controles reais, com as duas criações (quadrada e faixa 9,9:1).
-  const BANNER_MATCH_THRESHOLD = 0.83;
-  const COARSE_W = 300, COARSE_DW = 24;
-  const FINE_W = 1600, FINE_DW = 64;
+  // Limiar no ponto médio entre o menor positivo (0,93) e o maior negativo (0,76)
+  // medidos nos controles reais, com as duas criações (quadrada 1,2:1 e faixa 9,9:1).
+  const BANNER_MATCH_THRESHOLD = 0.84;
+  const COARSE_W = 300, FINE_W = 1600;
+  // Orçamento de amostras do descritor. As dimensões saem do ASPECTO do banner: fixar a
+  // largura em 64 dava só 6 linhas para uma faixa 9,9:1, e qualquer tarja horizontal
+  // vermelha correlacionava com ela (falso positivo a 0,84).
+  const COARSE_SAMPLES = 400, FINE_SAMPLES = 8192;
   const COARSE_PEAKS = 4; // quantos picos grosseiros distintos merecem refino
   const MIN_WINDOW_PX = 4; // banners largos (9,9:1) têm janelas de poucos pixels de altura
+
+  function descriptorDims(aspect, samples, minH, minW) {
+    const DH = Math.max(minH, Math.round(Math.sqrt(samples / aspect)));
+    const DW = Math.max(minW, Math.round(aspect * DH));
+    return [DW, DH];
+  }
 
   // Reduzir de ~1900px para 300px numa única chamada de drawImage produz aliasing:
   // o canvas não faz média de área em saltos grandes, e a busca grosseira passa a
@@ -991,9 +1000,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   function matchSingleRef(coarse, fine, refEl) {
     const aspect = refEl.naturalWidth / refEl.naturalHeight;
 
-    const CDH = Math.max(6, Math.round(COARSE_DW / aspect));
-    const FDH0 = Math.max(6, Math.round(FINE_DW / aspect));
-    // banners verticais (aspecto < 1) geram descritores altos — dimensionar pelo maior
+    const [COARSE_DW, CDH] = descriptorDims(aspect, COARSE_SAMPLES, 4, 8);
+    const [FINE_DW, FDH0] = descriptorDims(aspect, FINE_SAMPLES, 6, 12);
     const scratch = new Float64Array(Math.max(COARSE_DW * CDH, FINE_DW * FDH0) * 3);
 
     const tC = templateVector(refEl, COARSE_DW, CDH);
