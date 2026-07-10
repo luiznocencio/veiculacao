@@ -1,11 +1,12 @@
 // api/analyze.js — função serverless da Vercel (Node.js, sem dependências externas).
 //
-// Papel: leitura da DATA de captura de uma página de comprovação.
+// Papel: leitura da DATA de captura e, sob demanda, SEGUNDA OPINIÃO sobre o banner.
 //
-// A detecção do banner NÃO é feita aqui, por decisão baseada em evidência: em controles
-// negativos (páginas do portal sem o banner) o modelo respondia "encontrado" e inventava
-// a justificativa. Quem decide sobre o banner é o casamento de template no cliente, que
-// é determinístico e devolve um score auditável.
+// O casamento de template no cliente é a primeira opinião (determinística, com score
+// auditável). Quando ele NÃO tem certeza, o cliente pede aqui uma segunda opinião: a
+// função recebe as artes de referência e a página e responde presente/ausente/incerto.
+// O prompt força o modelo a descrever antes de decidir e trata "ausente" como resposta
+// legítima — foi a falta dessa instrução que, no passado, gerava "encontrado" falso.
 //
 // Provedor: Anthropic Claude Haiku. O gpt-4o-mini foi testado e descartado por custo de
 // tokens de imagem: uma página A4 (1104x1568) consome 70.837 tokens nele — 2833 + 5667
@@ -20,15 +21,9 @@ const RETRY_BASE_DELAY_MS = 600;
 const FUNCTION_BUDGET_MS = 24000; // margem de segurança sob o maxDuration:30 do vercel.json
 const MAX_INLINE_WAIT_MS = 4000;  // só retenta na própria invocação se a espera indicada for curta
 
-const SYSTEM_PROMPT = `Você recebe a imagem de uma página de comprovação de veiculação
-publicitária. Ela contém a captura de tela de um site, às vezes embutida em um
-documento timbrado da própria empresa (com logotipo, assinatura, carimbo e uma
-data de emissão no rodapé).
-
-Sua única tarefa é identificar a data em que a captura de tela foi feita.
-
-Ordem de prioridade das evidências, todas avaliadas SOMENTE dentro da captura
-de tela do site, nunca no timbrado ao redor:
+// Regras de data — idênticas nos dois modos. Mantidas num só lugar para não divergirem.
+const DATE_RULES = `Ordem de prioridade das evidências de DATA, todas avaliadas SOMENTE
+dentro da captura de tela do site, nunca no timbrado ao redor:
 1. Relógio do sistema ou timestamp de captura. Em capturas de desktop Windows
    ele fica no CANTO INFERIOR DIREITO da barra de tarefas, com a hora em cima e
    a data logo abaixo (ex: "11:55" sobre "18/06/2026"). Se existir, use SEMPRE
@@ -41,21 +36,64 @@ de tela do site, nunca no timbrado ao redor:
 A data de emissão do documento timbrado (ex: "MACEIÓ | 08 DE JUL DE 2026")
 NUNCA deve ser usada.
 
-Responda com:
 - clock_date_text: transcrição LITERAL da data do relógio, exatamente como está
   escrita, com o ano completo de quatro dígitos. Não inclua a hora. null se não houver.
 - article_date_text: transcrição LITERAL da data da matéria mais recente. null se não houver.
-- notes: uma frase curta em português dizendo onde cada data foi vista.
 
 NÃO converta nem reformate as datas — apenas copie os caracteres que você enxerga.
 Se uma data estiver borrada demais para leitura segura, use null naquele campo:
-uma data confiantemente errada é pior para a auditoria do que uma pendência.
+uma data confiantemente errada é pior para a auditoria do que uma pendência.`;
+
+// Modo 1: só data. A imagem é uma página de comprovação.
+const SYSTEM_PROMPT_DATE = `Você recebe a imagem de uma página de comprovação de veiculação
+publicitária. Ela contém a captura de tela de um site, às vezes embutida em um
+documento timbrado da própria empresa (com logotipo, assinatura, carimbo e uma
+data de emissão no rodapé).
+
+Sua única tarefa é identificar a data em que a captura de tela foi feita.
+
+${DATE_RULES}
+
+- notes: uma frase curta em português dizendo onde a data foi vista.
 
 Responda APENAS com um JSON válido, sem markdown, sem texto extra, no formato:
 {"clock_date_text":"03/07/2026","article_date_text":"2026/07/03","notes":"..."}
 
 Se a imagem não contiver nenhuma captura de site reconhecível, responda
 {"clock_date_text":null,"article_date_text":null,"notes":"..."}.`;
+
+// Modo 2: segunda opinião sobre o banner + data. Vêm PRIMEIRO as artes de referência,
+// DEPOIS a página. O foco é combater o "encontrado" falso: descrever antes de decidir,
+// e deixar explícito que "ausente" é uma resposta correta e esperada.
+const SYSTEM_PROMPT_BANNER = `Você recebe DUAS coisas: primeiro uma ou mais imagens da
+ARTE DE REFERÊNCIA de um banner publicitário, e depois a imagem de uma PÁGINA DE
+COMPROVAÇÃO — a captura de tela de um site, às vezes embutida num documento timbrado.
+
+Você tem DUAS tarefas.
+
+TAREFA 1 — O banner de referência aparece dentro da captura?
+Descreva primeiro, em uma frase, o que realmente existe no topo, nas laterais e no corpo
+da captura. SÓ ENTÃO decida. É comum e ESPERADO que o banner não esteja presente:
+responder "nao" quando ele não está é a resposta CORRETA, nunca uma falha. Responda
+"sim" apenas se você realmente vê a MESMA arte (mesmas cores, mesmo texto, mesmo logotipo)
+dentro da captura. Responda "incerto" se a captura estiver cortada, borrada ou pequena
+demais para ter certeza. NUNCA invente um banner que não está claramente visível.
+
+TAREFA 2 — Qual a data da captura?
+${DATE_RULES}
+
+Responda com:
+- banner_present: "sim", "nao" ou "incerto".
+- banner_notes: uma frase curta dizendo o que você viu que embasa a resposta do banner.
+- clock_date_text, article_date_text (regras acima).
+- notes: uma frase curta dizendo onde a data foi vista.
+
+Responda APENAS com um JSON válido, sem markdown, sem texto extra, no formato:
+{"banner_present":"nao","banner_notes":"...","clock_date_text":null,"article_date_text":"2026/07/03","notes":"..."}`;
+
+function buildSystemPrompt(askBanner) {
+  return askBanner ? SYSTEM_PROMPT_BANNER : SYSTEM_PROMPT_DATE;
+}
 
 class UpstreamAuthError extends Error {}
 class RateLimitedError extends Error {
@@ -94,8 +132,10 @@ const MONTH_NAMES_PT = [
   'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'
 ];
 
-function buildAnalysisText(period) {
-  let text = 'Identifique a data da captura desta página de comprovação, seguindo exatamente as instruções do system prompt.';
+function buildAnalysisText(period, askBanner) {
+  let text = askBanner
+    ? 'As imagens acima são: primeiro a(s) arte(s) de referência do banner, e por último a página de comprovação. Faça as duas tarefas do system prompt sobre a ÚLTIMA imagem (a página).'
+    : 'Identifique a data da captura desta página de comprovação, seguindo exatamente as instruções do system prompt.';
   if (period) {
     const monthName = MONTH_NAMES_PT[period.month - 1];
     text += ` Contexto de auditoria: o período em verificação é ${monthName} de ${period.year}. ` +
@@ -107,25 +147,24 @@ function buildAnalysisText(period) {
   return text;
 }
 
-function buildRequestBody(pageImage, period) {
+function buildRequestBody(pageImage, period, refs, askBanner) {
+  const content = [];
+  // No modo banner, as artes de referência vêm ANTES da página (o prompt conta com essa ordem).
+  if (askBanner && refs.length) {
+    for (const ref of refs) {
+      content.push({ type: 'image', source: { type: 'base64', media_type: ref.mediaType, data: ref.base64 } });
+    }
+  }
+  content.push({ type: 'image', source: { type: 'base64', media_type: pageImage.mediaType, data: pageImage.base64 } });
+  content.push({ type: 'text', text: buildAnalysisText(period, askBanner) });
+
   return {
     model: MODEL_ID,
     max_tokens: 600,
-    // O system prompt é idêntico em todas as chamadas do lote: marcá-lo como cache
-    // evita pagar o custo total de input em cada uma das centenas de páginas.
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: pageImage.mediaType, data: pageImage.base64 }
-          },
-          { type: 'text', text: buildAnalysisText(period) }
-        ]
-      }
-    ]
+    // O system prompt se repete em todas as chamadas do lote: marcá-lo como cache evita
+    // pagar o custo total de input em cada página. (Cada modo tem sua própria entrada.)
+    system: [{ type: 'text', text: buildSystemPrompt(askBanner), cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content }]
   };
 }
 
@@ -151,6 +190,17 @@ function cleanText(value) {
   const t = value.trim();
   if (!t || /^(null|none|nenhum[ao]?|n\/a|-|--)$/i.test(t)) return null;
   return t;
+}
+
+// Normaliza a opinião do banner para um vocabulário fixo, tolerando variações do modelo
+// ("sim"/"yes"/"presente" → present; "nao"/"no"/"ausente" → absent; resto → uncertain).
+function normalizeBannerOpinion(value) {
+  const t = cleanText(value);
+  if (!t) return 'uncertain';
+  const s = t.toLowerCase();
+  if (/^(sim|s|yes|y|presente|present|true)$/.test(s) || /\bpresent/.test(s) || /\bsim\b/.test(s)) return 'present';
+  if (/^(nao|não|n|no|ausente|absent|false)$/.test(s) || /\bausent/.test(s) || /\bn[aã]o\b/.test(s)) return 'absent';
+  return 'uncertain';
 }
 
 // A conversão fica em código, não no modelo: ele lê os dígitos bem, mas erra a
@@ -282,11 +332,19 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const { pageImage, period } = req.body || {};
+  const { pageImage, period, refs } = req.body || {};
   if (!pageImage || !pageImage.base64 || !pageImage.mediaType) {
     res.status(400).json({ error: 'invalid_request', message: 'pageImage é obrigatório.' });
     return;
   }
+
+  // Só pedimos a segunda opinião quando o cliente manda artes de referência (askBanner:true
+  // + refs). O cliente as omite nas páginas em que o template já tem certeza — assim a
+  // maioria das chamadas segue barata, e só as duvidosas pagam os tokens das referências.
+  const validRefs = Array.isArray(refs)
+    ? refs.filter((r) => r && typeof r.base64 === 'string' && typeof r.mediaType === 'string').slice(0, 4)
+    : [];
+  const askBanner = req.body && req.body.askBanner === true && validRefs.length > 0;
 
   const validPeriod =
     period && Number.isInteger(period.month) && period.month >= 1 && period.month <= 12 &&
@@ -294,7 +352,7 @@ module.exports = async function handler(req, res) {
       ? period
       : null;
 
-  const body = buildRequestBody(pageImage, validPeriod);
+  const body = buildRequestBody(pageImage, validPeriod, validRefs, askBanner);
 
   try {
     const upstreamRes = await callAnthropicWithRetry(apiKey, body, startedAt);
@@ -302,10 +360,14 @@ module.exports = async function handler(req, res) {
     const rawText = (data.content || []).map((block) => block.text || '').join('');
     const parsed = parseModelJson(rawText);
     const resolved = resolveDate(parsed, validPeriod);
+    const bannerFields = askBanner
+      ? { banner_opinion: normalizeBannerOpinion(parsed.banner_present), banner_notes: cleanText(parsed.banner_notes) || '' }
+      : {};
     res.status(200).json({
       clock_date_text: cleanText(parsed.clock_date_text),
       article_date_text: cleanText(parsed.article_date_text),
       notes: parsed.notes || '',
+      ...bannerFields,
       ...resolved
     });
   } catch (err) {

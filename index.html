@@ -485,13 +485,102 @@
     text-align: center;
     padding: var(--space-4xl) 0;
   }
+
+  /* Revisão assistida: amarelo = precisa do olho humano; célula revisada ganha um ponto. */
+  .day-cell.review { background: var(--status-warn-bg); color: var(--color-warning); }
+  .day-cell.rejected { background: var(--status-bad-bg); color: var(--color-danger); }
+  .day-cell.clickable { cursor: pointer; }
+  .day-cell.clickable:hover { outline: 2px solid var(--color-brand); outline-offset: -2px; }
+  .day-cell.reviewed::after {
+    content: "";
+    position: absolute;
+    top: 3px; right: 3px;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--color-brand);
+    box-shadow: 0 0 0 2px var(--surface-card);
+  }
+
+  /* Modal de inspeção — o print à vista para o auditor confirmar ou corrigir. */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(16, 24, 40, 0.55);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-medium);
+    z-index: 50;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 12px 40px rgba(16, 24, 40, 0.28);
+    width: 100%;
+    max-width: 560px;
+    max-height: 90vh;
+    overflow-y: auto;
+    padding: var(--space-xxlarge);
+  }
+  .modal-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--space-small);
+    margin-bottom: var(--space-medium);
+  }
+  .modal-title { font-size: var(--text-body-md); font-weight: var(--fw-semibold); color: var(--text-strong); }
+  .modal-sub { font-size: var(--text-label-sm); color: var(--text-subtle); margin-top: 2px; }
+  .modal-close {
+    background: none; border: none; color: var(--text-subtle);
+    font-size: 22px; line-height: 1; cursor: pointer; padding: 2px 6px;
+  }
+  .modal-close:hover { color: var(--text-default); }
+  .modal-thumb {
+    width: 100%;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--surface-sunken);
+    display: block;
+    margin-bottom: var(--space-medium);
+  }
+  .modal-row {
+    display: flex;
+    gap: var(--space-xsmall);
+    align-items: baseline;
+    font-size: var(--text-body-sm);
+    padding: var(--space-xsmall) 0;
+    border-top: 1px solid var(--border-default);
+  }
+  .modal-row .k { color: var(--text-muted); min-width: 84px; flex-shrink: 0; }
+  .modal-row .v { color: var(--text-default); }
+  .vpill {
+    display: inline-flex; align-items: center; gap: var(--space-quark);
+    font-size: var(--text-label-sm); font-weight: var(--fw-semibold);
+    padding: 2px var(--space-xsmall); border-radius: var(--radius-pill);
+  }
+  .vpill.present { background: var(--status-ok-bg); color: var(--color-success); }
+  .vpill.absent { background: var(--status-bad-bg); color: var(--color-danger); }
+  .vpill.uncertain { background: var(--status-warn-bg); color: var(--color-warning); }
+  .modal-actions {
+    display: flex; flex-wrap: wrap; gap: var(--space-xsmall);
+    margin-top: var(--space-xlarge);
+  }
+  .modal-actions .btn { flex: 1; min-width: 120px; }
+  .btn.approve:hover { border-color: var(--color-success); color: var(--color-success); }
+  .btn.reject:hover { border-color: var(--color-danger); color: var(--color-danger); }
+  .btn.active-approve { border-color: var(--color-success); color: var(--color-success); background: var(--status-ok-bg); }
+  .btn.active-reject { border-color: var(--color-danger); color: var(--color-danger); background: var(--status-bad-bg); }
+  .modal-hint { font-size: var(--text-label-sm); color: var(--text-subtle); margin-top: var(--space-small); }
 </style>
 </head>
 <body>
 <header>
   <div>
     <h1>Verificador de Veiculação de Banners</h1>
-    <p>Confira automaticamente se os comprovantes em PDF de cada site cobrem todos os dias do mês, com o banner correto no ar e a data legível.</p>
+    <p>A ferramenta lê cada PDF, monta a grade de dias do mês e classifica cada dia por confiança: <strong>verde</strong> aprova sozinho, <strong>amarelo</strong> pede sua revisão. Clique em qualquer dia para ver o print e confirmar ou corrigir.</p>
   </div>
   <button class="theme-toggle" id="themeToggle" type="button" aria-label="Alternar tema"></button>
 </header>
@@ -545,6 +634,10 @@
     <div class="empty-hint">Os resultados por site aparecerão aqui após a análise.</div>
   </section>
 </main>
+
+<div class="modal-backdrop" id="reviewModal" role="dialog" aria-modal="true">
+  <div class="modal" id="reviewModalBox"></div>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
@@ -613,7 +706,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     progressWrap: document.getElementById('progressWrap'),
     progressLabel: document.getElementById('progressLabel'),
     progressFill: document.getElementById('progressFill'),
-    results: document.getElementById('results')
+    results: document.getElementById('results'),
+    reviewModal: document.getElementById('reviewModal'),
+    reviewModalBox: document.getElementById('reviewModalBox')
   };
 
   function showApiErrorBanner(message) {
@@ -870,6 +965,24 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     canvas.height = 0;
   }
 
+  // Miniatura guardada por página para a revisão humana: o auditor precisa VER o print
+  // ao decidir. ~480px cobre bem o banner e a maioria das datas; o PDF original fica para
+  // inspeção fina. JPEG 0.72 mantém o custo de memória baixo mesmo com 20 PDFs.
+  const THUMB_LONG_EDGE = 480;
+  function canvasToThumb(canvas) {
+    const longEdge = Math.max(canvas.width, canvas.height);
+    const scale = Math.min(1, THUMB_LONG_EDGE / longEdge);
+    const w = Math.max(1, Math.round(canvas.width * scale));
+    const h = Math.max(1, Math.round(canvas.height * scale));
+    const out = document.createElement('canvas');
+    out.width = w;
+    out.height = h;
+    out.getContext('2d').drawImage(canvas, 0, 0, w, h);
+    const url = out.toDataURL('image/jpeg', 0.72);
+    releaseCanvas(out);
+    return url;
+  }
+
   function canvasToApiImage(canvas) {
     const longEdge = Math.max(canvas.width, canvas.height);
     const scale = Math.min(1, API_LONG_EDGE / longEdge);
@@ -892,6 +1005,12 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   // Limiar no ponto médio entre o menor positivo (0,93) e o maior negativo (0,76)
   // medidos nos controles reais, com as duas criações (quadrada 1,2:1 e faixa 9,9:1).
   const BANNER_MATCH_THRESHOLD = 0.84;
+  // Acima disto o template sozinho já é confiável (positivos reais ficaram em 0,90–0,93):
+  // pulamos a segunda opinião da IA e economizamos a chamada com as referências.
+  // Entre 0,84 e este valor o template "achou", mas pedimos confirmação à IA; abaixo de
+  // 0,84 o template diz "não", e aí a IA é essencial para pegar variações da arte que ele
+  // erra — é o caso perigoso (banner que não veiculou não pode passar como OK).
+  const BANNER_PRESENT_STRONG = 0.90;
   const COARSE_W = 300, FINE_W = 1600;
   // Orçamento de amostras do descritor. As dimensões saem do ASPECTO do banner: fixar a
   // largura em 64 dava só 6 linhas para uma faixa 9,9:1, e qualquer tarja horizontal
@@ -1112,16 +1231,68 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     return best;
   }
 
-  // ---------- Leitura de data pela IA (o banner é decidido localmente, por template) ----------
-  async function analyzePageWithAi(pageCanvas) {
+  // ---------- Veredito de confiança: combina o template com a 2ª opinião da IA ----------
+  // A ideia central da revisão assistida: só é VERDE (aprovação automática) quando as duas
+  // fontes concordam com alta confiança. Qualquer dúvida ou conflito vira AMARELO (revisar)
+  // — nunca um verde silencioso, nunca uma reprovação automática. O humano decide o resto.
+  function computeBannerVerdict(score, aiOpinion, askedBanner) {
+    const scoreTxt = score >= 0 ? score.toFixed(2) : '—';
+    if (score >= BANNER_PRESENT_STRONG) {
+      return { banner: 'present', confidence: 'high', aiOpinion: null,
+        reason: `Template com similaridade alta (${scoreTxt}).` };
+    }
+    const leansPresent = score >= BANNER_MATCH_THRESHOLD;
+    const ai = aiOpinion || null;
+    if (!askedBanner || !ai) {
+      return leansPresent
+        ? { banner: 'present', confidence: 'medium', aiOpinion: ai, reason: `Template no limite (${scoreTxt}), sem confirmação da IA.` }
+        : { banner: 'absent', confidence: 'medium', aiOpinion: ai, reason: `Template baixo (${scoreTxt}), sem confirmação da IA.` };
+    }
+    if (leansPresent) {
+      if (ai === 'present') return { banner: 'present', confidence: 'high', aiOpinion: ai, reason: `Template (${scoreTxt}) e IA concordam: banner presente.` };
+      if (ai === 'uncertain') return { banner: 'present', confidence: 'medium', aiOpinion: ai, reason: `Template achou (${scoreTxt}); IA ficou em dúvida.` };
+      return { banner: 'uncertain', confidence: 'medium', aiOpinion: ai, reason: `Conflito: template achou (${scoreTxt}), mas a IA diz ausente.` };
+    }
+    // Template baixo — o caso perigoso. A IA aqui é o que pega variações da arte que o
+    // template erra (e evita marcar como OK um banner que na verdade veiculou diferente).
+    if (ai === 'absent') return { banner: 'absent', confidence: 'high', aiOpinion: ai, reason: `Template (${scoreTxt}) e IA concordam: banner ausente.` };
+    if (ai === 'uncertain') return { banner: 'absent', confidence: 'medium', aiOpinion: ai, reason: `Template baixo (${scoreTxt}); IA ficou em dúvida.` };
+    return { banner: 'present', confidence: 'medium', aiOpinion: ai, reason: `Conflito: template baixo (${scoreTxt}), mas a IA diz presente (possível variação da arte).` };
+  }
+
+  // Verde só com banner presente E alta confiança; todo o resto pede revisão humana.
+  function baseStatus(verdict) {
+    return (verdict.banner === 'present' && verdict.confidence === 'high') ? 'ok' : 'review';
+  }
+
+  function bannerLabel(verdict) {
+    return verdict.banner === 'present' ? 'presente'
+      : verdict.banner === 'absent' ? 'ausente' : 'incerto';
+  }
+
+  // Status exibido leva em conta a decisão manual do auditor, se houver.
+  function displayedStatus(info) {
+    if (!info) return null;
+    if (info.override === 'approved') return 'ok';
+    if (info.override === 'rejected') return 'rejected';
+    return info.status;
+  }
+
+  // ---------- IA: sempre lê a data; sob demanda dá a segunda opinião do banner ----------
+  async function analyzePageWithAi(pageCanvas, askBanner) {
     const pageImage = canvasToApiImage(pageCanvas);
+    const payload = {
+      pageImage,
+      period: { month: state.month + 1, year: state.year }
+    };
+    if (askBanner) {
+      payload.askBanner = true;
+      payload.refs = state.refs.map((r) => ({ base64: r.base64, mediaType: r.mediaType }));
+    }
     const res = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        pageImage,
-        period: { month: state.month + 1, year: state.year }
-      })
+      body: JSON.stringify(payload)
     });
 
     if (res.status === 401 || res.status === 403) {
@@ -1151,21 +1322,38 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     return new Date(state.year, state.month + 1, 0).getDate();
   }
 
-  function createSiteCard(siteResult) {
+  function createSiteCard(siteResult, siteIndex) {
     const totalDays = daysInSelectedMonth();
-    const counts = { ok: 0, problem: 0, missing: 0 };
+    const counts = { ok: 0, review: 0, red: 0 };
     const cells = [];
 
     for (let day = 1; day <= totalDays; day++) {
       const info = siteResult.days.get(day);
-      const status = info ? info.status : (siteResult.complete ? 'missing' : 'pending');
-      if (status !== 'pending') counts[status] = (counts[status] || 0) + 1;
-      const notesAttr = info && info.notes ? escapeHtml(info.notes) : 'Nenhum print encontrado para este dia.';
-      cells.push(`<div class="day-cell ${status}" title="Dia ${day}: ${notesAttr}">${day}</div>`);
+      const status = info ? displayedStatus(info) : (siteResult.complete ? 'missing' : 'pending');
+      if (status === 'ok') counts.ok++;
+      else if (status === 'review') counts.review++;
+      else if (status === 'missing' || status === 'rejected') counts.red++;
+
+      const reviewedCls = info && info.override ? ' reviewed' : '';
+      const clickableCls = info ? ' clickable' : '';
+      const titleTxt = info
+        ? `Dia ${day}: ${info.reason || 'clique para revisar'}${info.override ? ' — revisado manualmente' : ''}`
+        : `Dia ${day}: nenhum print encontrado.`;
+      const dataAttr = info ? ` data-site-index="${siteIndex}" data-day="${day}"` : '';
+      cells.push(`<div class="day-cell ${status}${clickableCls}${reviewedCls}"${dataAttr} title="${escapeHtml(titleTxt)}">${day}</div>`);
     }
 
+    // Prints que têm banner mas cuja data não deu para ler não podem sumir: ficam
+    // acessíveis para o auditor inspecionar e associar manualmente.
+    const unplacedHtml = siteResult.unplaced.length
+      ? `<div class="notes-log"><strong>Prints sem data legível (${siteResult.unplaced.length})</strong> — clique para inspecionar:
+          <div class="chiplist">${siteResult.unplaced.map((u, i) =>
+            `<button type="button" class="chip" style="cursor:pointer" data-site-index="${siteIndex}" data-unplaced="${i}">página ${u.page}</button>`
+          ).join('')}</div></div>`
+      : '';
+
     const notesHtml = siteResult.extraNotes.length
-      ? `<div class="notes-log"><strong>Notas adicionais</strong><ul>${siteResult.extraNotes.map((n) => `<li>${escapeHtml(n)}</li>`).join('')}</ul></div>`
+      ? `<div class="notes-log"><strong>Notas da análise automática</strong><ul>${siteResult.extraNotes.map((n) => `<li>${escapeHtml(n)}</li>`).join('')}</ul></div>`
       : '';
 
     return `
@@ -1173,21 +1361,22 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         <div class="site-card-header">
           <div>
             <div class="site-card-title">${escapeHtml(siteResult.siteName)}</div>
-            <div class="site-card-sub">${totalDays} dias no mês selecionado</div>
+            <div class="site-card-sub">${totalDays} dias no mês selecionado · clique numa célula para revisar</div>
           </div>
           <div class="badges">
             <span class="badge ok">✓ ${counts.ok} ok</span>
-            <span class="badge warn">△ ${counts.problem} c/ problema</span>
-            <span class="badge bad">✕ ${counts.missing} faltando</span>
+            <span class="badge warn">△ ${counts.review} revisar</span>
+            <span class="badge bad">✕ ${counts.red} sem print/reprovado</span>
           </div>
         </div>
         <div class="legend">
-          <span><span class="dot" style="background:var(--color-success)"></span>Ok</span>
-          <span><span class="dot" style="background:var(--color-warning)"></span>Problema</span>
-          <span><span class="dot" style="background:var(--color-danger)"></span>Faltando</span>
-          <span><span class="dot" style="background:var(--surface-sunken);border:1px solid var(--border-default)"></span>Pendente</span>
+          <span><span class="dot" style="background:var(--color-success)"></span>Aprovado</span>
+          <span><span class="dot" style="background:var(--color-warning)"></span>Revisar</span>
+          <span><span class="dot" style="background:var(--color-danger)"></span>Sem print / reprovado</span>
+          <span><span class="dot" style="background:var(--color-brand)"></span>Revisado por você</span>
         </div>
         <div class="day-grid">${cells.join('')}</div>
+        ${unplacedHtml}
         ${notesHtml}
       </div>
     `;
@@ -1200,6 +1389,111 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     }
     el.results.innerHTML = state.results.map(createSiteCard).join('');
   }
+
+  // ---------- Revisão assistida: modal com o print e a decisão manual ----------
+  let reviewCtx = null; // { siteIndex, day } ou { siteIndex, unplaced }
+
+  function readingFor(ctx) {
+    const site = state.results[ctx.siteIndex];
+    if (!site) return null;
+    return ctx.day != null ? site.days.get(ctx.day) : site.unplaced[ctx.unplaced];
+  }
+
+  function openReview(ctx) {
+    reviewCtx = ctx;
+    const info = readingFor(ctx);
+    if (!info) return;
+    renderReviewModal(info);
+    el.reviewModal.classList.add('open');
+  }
+
+  function closeReview() {
+    reviewCtx = null;
+    el.reviewModal.classList.remove('open');
+  }
+
+  function renderReviewModal(info) {
+    const site = state.results[reviewCtx.siteIndex];
+    const v = info.verdict || { banner: 'uncertain', confidence: 'medium', reason: '' };
+    const dayLabel = info.day != null ? `Dia ${info.day}` : `Página ${info.page} — sem dia atribuído`;
+    const aiTxt = info.aiOpinion
+      ? (info.aiOpinion === 'present' ? 'presente' : info.aiOpinion === 'absent' ? 'ausente' : 'incerto')
+      : 'não consultada (template já decidiu)';
+    const scoreTxt = info.score >= 0 ? info.score.toFixed(2) : '—';
+    const dateTxt = info.dateIso
+      ? `${escapeHtml(info.dateIso)} <span style="color:var(--text-subtle)">(${escapeHtml(info.dateSource || 'IA')})</span>`
+      : `<span style="color:var(--color-warning)">não lida${info.dateWarning ? ' — ' + escapeHtml(info.dateWarning) : ''}</span>`;
+
+    // Só o print que de fato OCUPA o dia é decidível aqui. Um 2º print que disputa o
+    // mesmo dia (duplicidade) é apenas inspecionável — a decisão é na célula do dia.
+    const stored = info.day != null ? site.days.get(info.day) : null;
+    const canDecide = stored === info;
+    let actions;
+    if (canDecide) {
+      actions = `
+      <div class="modal-actions">
+        <button type="button" class="btn approve ${info.override === 'approved' ? 'active-approve' : ''}" data-action="approve">✓ Aprovar (banner ok)</button>
+        <button type="button" class="btn reject ${info.override === 'rejected' ? 'active-reject' : ''}" data-action="reject">✕ Reprovar</button>
+        <button type="button" class="btn" data-action="auto" ${info.override ? '' : 'disabled'}>↺ Automático</button>
+      </div>
+      <div class="modal-hint">${info.override ? 'Decisão manual aplicada — sobrepõe o veredito automático.' : 'Sem decisão manual: vale o veredito automático acima.'}</div>`;
+    } else if (info.day != null) {
+      actions = `<div class="modal-hint">Este print disputa o <strong>dia ${info.day}</strong> com outra página. Resolva a duplicidade abrindo a célula do dia ${info.day} na grade.</div>`;
+    } else {
+      actions = `<div class="modal-hint">Este print não tem data legível, então não foi associado a um dia. Confira no PDF original; se a data pertencer ao mês auditado, considere refazer a análise com a arte de referência correta.</div>`;
+    }
+
+    el.reviewModalBox.innerHTML = `
+      <div class="modal-head">
+        <div>
+          <div class="modal-title">${dayLabel}</div>
+          <div class="modal-sub">${escapeHtml(site.siteName)} · página ${info.page}</div>
+        </div>
+        <button type="button" class="modal-close" data-action="close" aria-label="Fechar">×</button>
+      </div>
+      <img class="modal-thumb" src="${info.thumb}" alt="Print da página ${info.page}">
+      <div class="modal-row"><span class="k">Banner</span><span class="v"><span class="vpill ${v.banner}">${bannerLabel(v)}</span> &nbsp;${escapeHtml(v.reason || '')}</span></div>
+      <div class="modal-row"><span class="k">Template</span><span class="v">similaridade ${scoreTxt} (limiar ${BANNER_MATCH_THRESHOLD})</span></div>
+      <div class="modal-row"><span class="k">2ª opinião IA</span><span class="v">${aiTxt}${info.aiBannerNotes ? ' — ' + escapeHtml(info.aiBannerNotes) : ''}</span></div>
+      <div class="modal-row"><span class="k">Data</span><span class="v">${dateTxt}</span></div>
+      ${actions}
+    `;
+  }
+
+  function applyOverride(value) {
+    const info = readingFor(reviewCtx);
+    if (!info) return;
+    info.override = info.override === value ? null : value;
+    renderAllSiteCards();
+    renderReviewModal(info); // reflete o novo estado sem fechar o modal
+  }
+
+  // Clique nas células/chips dos cards abre a revisão.
+  el.results.addEventListener('click', (e) => {
+    const target = e.target.closest('[data-site-index]');
+    if (!target) return;
+    const siteIndex = Number(target.dataset.siteIndex);
+    if (target.dataset.day != null) openReview({ siteIndex, day: Number(target.dataset.day) });
+    else if (target.dataset.unplaced != null) openReview({ siteIndex, unplaced: Number(target.dataset.unplaced) });
+  });
+
+  // Ações dentro do modal.
+  el.reviewModalBox.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    if (action === 'close') closeReview();
+    else if (action === 'approve') applyOverride('approved');
+    else if (action === 'reject') applyOverride('rejected');
+    else if (action === 'auto') applyOverride(null);
+  });
+
+  el.reviewModal.addEventListener('click', (e) => {
+    if (e.target === el.reviewModal) closeReview(); // clique no fundo fecha
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && el.reviewModal.classList.contains('open')) closeReview();
+  });
 
   // ---------- Main orchestrator ----------
   el.runBtn.addEventListener('click', runAnalysis);
@@ -1224,6 +1518,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     state.results = state.pdfs.map((pdf) => ({
       siteName: pdf.name,
       days: new Map(),
+      unplaced: [],
       extraNotes: [],
       complete: false
     }));
@@ -1270,47 +1565,66 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
             canvas = await renderPdfPage(pdf, pageNumber);
 
             const match = matchBanner(canvas);
-            const scoreTxt = match.score >= 0 ? match.score.toFixed(2) : '—';
+            // Só gastamos a 2ª opinião (com as referências) quando o template NÃO tem
+            // certeza. Acima de BANNER_PRESENT_STRONG confiamos nele e economizamos.
+            const askBanner = !(match.score >= BANNER_PRESENT_STRONG);
+            const thumb = canvasToThumb(canvas);
             await sleep(0); // devolve o controle ao navegador depois do trecho pesado de CPU
 
             await waitForCooldown();
-            const ai = await analyzePageWithAi(canvas);
+            const ai = await analyzePageWithAi(canvas, askBanner);
+            const verdict = computeBannerVerdict(match.score, ai.banner_opinion, askBanner);
             const date = ai.date_found
               ? { iso: ai.date_found, source: ai.date_source || 'IA' }
               : null;
 
+            const reading = {
+              page: pageNumber,
+              thumb,
+              score: match.score,
+              aiOpinion: ai.banner_opinion || null,
+              aiBannerNotes: ai.banner_notes || '',
+              verdict,
+              dateIso: date ? date.iso : null,
+              dateSource: date ? date.source : null,
+              dateWarning: ai.date_warning || null,
+              override: null
+            };
+
             if (!date) {
+              // Print existe, mas sem data: não dá para colocá-lo num dia. Fica acessível
+              // na lista "prints sem data legível" para revisão manual — não some.
               const why = ai.date_warning ? ` (${ai.date_warning})` : '';
-              siteResult.extraNotes.push(`Página ${pageNumber}: nenhuma data legível encontrada na captura${why}.`);
+              siteResult.unplaced.push(reading);
+              siteResult.extraNotes.push(`Página ${pageNumber}: banner ${bannerLabel(verdict)}, mas data ilegível${why} — não associada a um dia. Veja em "prints sem data legível".`);
               return;
             }
 
             const day = parseIsoDateInMonth(date.iso, state.month, state.year);
             if (day === null) {
-              siteResult.extraNotes.push(`Página ${pageNumber}: data extraída (${date.iso}) fora do mês/ano selecionado. Origem: ${date.source}.`);
+              siteResult.unplaced.push(reading);
+              siteResult.extraNotes.push(`Página ${pageNumber}: data lida (${date.iso}) fora do mês/ano selecionado. Origem: ${date.source}.`);
               return;
             }
 
+            reading.day = day;
             readings.push({ page: pageNumber, iso: date.iso });
 
-            const notes = `Banner ${match.found ? 'encontrado' : 'NÃO encontrado'} (similaridade ${scoreTxt}). Data pela ${date.source}.`;
             const existing = siteResult.days.get(day);
             if (existing && existing.page !== pageNumber) {
-              // Duplicidade não depende da ordem das páginas: é sempre ambígua.
-              siteResult.extraNotes.push(`Dia ${day} reivindicado pelas páginas ${existing.page} e ${pageNumber} — ambas marcadas para revisão.`);
-              siteResult.days.set(day, {
-                status: 'problem',
-                notes: `Dia ambíguo: páginas ${existing.page} e ${pageNumber} leram a mesma data.`,
-                page: existing.page
-              });
+              // Duplicidade não depende da ordem das páginas: é sempre ambígua → revisar.
+              existing.duplicateOf = existing.duplicateOf || [existing.page];
+              existing.duplicateOf.push(pageNumber);
+              existing.status = 'review';
+              existing.reason = `Dia ambíguo: páginas ${existing.duplicateOf.join(', ')} leram esta mesma data.`;
+              siteResult.unplaced.push(reading); // o 2º print também fica inspecionável
+              siteResult.extraNotes.push(`Dia ${day} reivindicado pelas páginas ${existing.duplicateOf.join(' e ')} — marcado para revisão.`);
               return;
             }
 
-            siteResult.days.set(day, {
-              status: match.found ? 'ok' : 'problem',
-              notes,
-              page: pageNumber
-            });
+            reading.status = baseStatus(verdict);
+            reading.reason = verdict.reason;
+            siteResult.days.set(day, reading);
           } catch (err) {
             if (err instanceof ApiKeyError) {
               stoppedForApiKey = true;
@@ -1364,11 +1678,11 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
           siteResult.extraNotes.push('As datas lidas não estão em ordem crescente entre as páginas. Isso pode ser só a ordem do PDF, ou uma data lida errada — vale conferir.');
         }
         // Um dia amarelo não pode ficar sem explicação: nomear cada um e o porquê.
-        const problemDays = [...siteResult.days.entries()]
-          .filter(([, info]) => info.status === 'problem')
+        const reviewDays = [...siteResult.days.entries()]
+          .filter(([, info]) => info.status === 'review')
           .sort((a, b) => a[0] - b[0]);
-        problemDays.forEach(([day, info]) => {
-          siteResult.extraNotes.push(`Dia ${day} (página ${info.page}): ${info.notes}`);
+        reviewDays.forEach(([day, info]) => {
+          siteResult.extraNotes.push(`Dia ${day} (página ${info.page}) — revisar: ${info.reason || 'motivo não registrado'}`);
         });
 
         // Um site inteiro sem nenhum banner reconhecido quase sempre significa que a arte
