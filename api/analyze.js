@@ -1,7 +1,11 @@
 // api/analyze.js — função serverless da Vercel (Node.js, sem dependências externas).
-// Recebe { refs, pageImage } do frontend, chama a Anthropic (Claude) com a chave guardada
-// só no servidor, e devolve { prints: [...] } já parseado. O cliente nunca vê a chave nem
-// o texto bruto do modelo.
+//
+// Papel reduzido de propósito: esta função é apenas o FALLBACK de leitura de data,
+// acionado quando o OCR local (Tesseract, no navegador) não encontra nenhuma data.
+// A detecção do banner NÃO é feita aqui e nunca mais será: o modelo se mostrou incapaz
+// de negar a presença do banner — em controles negativos (páginas do portal sem o
+// banner) ele respondia "encontrado" e inventava a justificativa. Isso agora é
+// resolvido no cliente por casamento de template, que é determinístico e auditável.
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -11,56 +15,42 @@ const RETRY_BASE_DELAY_MS = 600;
 const FUNCTION_BUDGET_MS = 24000; // margem de segurança sob o maxDuration:30 do vercel.json
 const MAX_INLINE_WAIT_MS = 4000;  // só retenta na própria invocação se a espera indicada for curta
 
-const SYSTEM_PROMPT = `Você é um auditor de veiculação de banners publicitários. Você recebe primeiro
-uma ou mais imagens de referência da arte do banner (podem existir em
-formatos/tamanhos diferentes, mas é sempre a mesma arte/campanha), e depois
-uma imagem de uma página de PDF que pode conter um ou mais prints/capturas de
-tela separadas, cada uma mostrando um site com o banner supostamente no ar,
-e alguma indicação de data (pode ser um timestamp de captura, um relógio do
-sistema, ou a data de publicação de uma matéria/notícia visível na página).
+const SYSTEM_PROMPT = `Você recebe a imagem de uma página de comprovação de veiculação
+publicitária. Ela contém a captura de tela de um site, às vezes embutida em um
+documento timbrado da própria empresa (com logotipo, assinatura, carimbo e uma
+data de emissão no rodapé).
 
-ATENÇÃO à estrutura da página: muitas vezes o print do site vem embutido em
-um documento timbrado do próprio veículo — com logotipo, cabeçalho, rodapé,
-assinatura, carimbo/CNPJ e uma data de emissão do documento (ex: "MACEIÓ |
-08 DE JUL DE 2026"). Essa moldura NÃO faz parte do print do site. Datas que
-pertencem ao timbrado (data de emissão, data junto à assinatura, cabeçalho
-ou rodapé do documento) NUNCA devem ser usadas como evidência do dia de
-veiculação — considere apenas o que está DENTRO do screenshot do site.
+Sua única tarefa é identificar a data em que a captura de tela foi feita.
 
-Para CADA print distinto que você identificar na imagem da página, responda:
-- banner_found: true se a arte do banner na imagem de referência aparece
-  visivelmente no print, false caso contrário.
-- clock_date_text: a transcrição LITERAL da data mostrada pelo relógio do
-  sistema ou timestamp de captura DENTRO do print, exatamente como aparece
-  escrita (ex: "18/06/2026"). DICA IMPORTANTE: em capturas de desktop
-  Windows, o relógio fica no CANTO INFERIOR DIREITO da barra de tarefas,
-  com a hora em cima e a data logo abaixo (ex: "11:55" sobre "18/06/2026").
-  Examine esse canto com atenção máxima antes de responder. Transcreva a data
-  COMPLETA, incluindo o ano com os quatro dígitos — nunca a trunque para
-  "11/06". Não inclua a hora neste campo. Use null apenas se realmente não
-  houver relógio/timestamp legível no print.
-- article_date_text: a transcrição LITERAL da data de publicação da matéria
-  mais recente visível dentro do print — byline, "publicado em", data junto
-  ao título, ou data no caminho da URL da barra de endereços (ex:
-  ".../2026/06/02/..." → transcreva "2026/06/02"). Se houver várias matérias
-  com datas diferentes, transcreva a MAIS RECENTE. null se não houver.
-- notes: uma frase curta em português explicando o que foi observado e
-  onde cada data foi vista; se uma data de timbrado foi ignorada, mencione.
+Ordem de prioridade das evidências, todas avaliadas SOMENTE dentro da captura
+de tela do site, nunca no timbrado ao redor:
+1. Relógio do sistema ou timestamp de captura. Em capturas de desktop Windows
+   ele fica no CANTO INFERIOR DIREITO da barra de tarefas, com a hora em cima e
+   a data logo abaixo (ex: "11:55" sobre "18/06/2026"). Se existir, use SEMPRE
+   essa data, mesmo que haja outras datas na página.
+2. Se não houver relógio, use a data de publicação da matéria mais recente
+   visível dentro da captura (byline, "publicado em", ou a data no caminho da
+   URL na barra de endereços, ex: ".../2026/06/02/...").
+3. Se não houver nenhuma das duas, use null.
 
-Regras para as transcrições:
-- NÃO converta, NÃO reformate — apenas copie os caracteres que você enxerga.
-- Considere apenas o que está DENTRO do screenshot do site; datas do
-  documento timbrado ao redor (emissão, assinatura, rodapé) NUNCA entram
-  em nenhum dos dois campos.
-- Se uma data estiver borrada ou pequena demais para leitura segura, use
-  null naquele campo em vez de arriscar — uma data confiantemente errada é
-  pior para a auditoria do que uma pendência de revisão humana.
+A data de emissão do documento timbrado (ex: "MACEIÓ | 08 DE JUL DE 2026")
+NUNCA deve ser usada.
 
-Responda APENAS com um JSON válido, sem markdown, sem texto extra,
-no formato exato:
-{"prints":[{"banner_found":true,"clock_date_text":"03/07/2026","article_date_text":"2026/07/03","notes":"..."}]}
+Responda com:
+- clock_date_text: transcrição LITERAL da data do relógio, exatamente como está
+  escrita, com o ano completo de quatro dígitos. Não inclua a hora. null se não houver.
+- article_date_text: transcrição LITERAL da data da matéria mais recente. null se não houver.
+- notes: uma frase curta em português dizendo onde cada data foi vista.
 
-Se a página não tiver nenhum print reconhecível, responda {"prints":[]}.`;
+NÃO converta nem reformate as datas — apenas copie os caracteres que você enxerga.
+Se uma data estiver borrada demais para leitura segura, use null naquele campo:
+uma data confiantemente errada é pior para a auditoria do que uma pendência.
+
+Responda APENAS com um JSON válido, sem markdown, sem texto extra, no formato:
+{"clock_date_text":"03/07/2026","article_date_text":"2026/07/03","notes":"..."}
+
+Se a imagem não contiver nenhuma captura de site reconhecível, responda
+{"clock_date_text":null,"article_date_text":null,"notes":"..."}.`;
 
 class UpstreamAuthError extends Error {}
 class RateLimitedError extends Error {
@@ -99,7 +89,7 @@ const MONTH_NAMES_PT = [
 ];
 
 function buildAnalysisText(period) {
-  let text = 'Analise esta página de comprovação de veiculação e identifique cada print presente, seguindo exatamente as instruções do system prompt.';
+  let text = 'Identifique a data da captura desta página de comprovação, seguindo exatamente as instruções do system prompt.';
   if (period) {
     const monthName = MONTH_NAMES_PT[period.month - 1];
     text += ` Contexto de auditoria: o período em verificação é ${monthName} de ${period.year}. ` +
@@ -111,25 +101,17 @@ function buildAnalysisText(period) {
   return text;
 }
 
-function buildRequestBody(refs, pageImage, period) {
+function buildRequestBody(pageImage, period) {
   const content = [
-    ...refs.map((ref, idx) => ({
-      type: 'image',
-      source: { type: 'base64', media_type: ref.mediaType, data: ref.base64 },
-      ...(idx === refs.length - 1 ? { cache_control: { type: 'ephemeral' } } : {})
-    })),
     {
       type: 'image',
       source: { type: 'base64', media_type: pageImage.mediaType, data: pageImage.base64 }
     },
-    {
-      type: 'text',
-      text: buildAnalysisText(period)
-    }
+    { type: 'text', text: buildAnalysisText(period) }
   ];
   return {
     model: MODEL_ID,
-    max_tokens: 1000,
+    max_tokens: 600,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content }]
   };
@@ -141,9 +123,7 @@ function parseModelJson(rawText) {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   if (start === -1 || end === -1) throw new Error('Resposta sem JSON reconhecível');
-  const parsed = JSON.parse(text.slice(start, end + 1));
-  if (!Array.isArray(parsed.prints)) throw new Error('Campo "prints" ausente ou inválido');
-  return parsed;
+  return JSON.parse(text.slice(start, end + 1));
 }
 
 function isoOrNull(year, month, day) {
@@ -151,10 +131,9 @@ function isoOrNull(year, month, day) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-// Converte a transcrição literal da data para ISO em código. O modelo lê os dígitos bem,
-// mas erra a conversão estruturada (ex: "01/06/2026" virando "2026-01-01") e às vezes
-// trunca o ano ("11/06"), então a conversão é feita aqui, de forma determinística.
-// fallbackYear (o ano auditado) só é usado quando a transcrição não traz ano nenhum.
+// A conversão fica em código, não no modelo: ele lê os dígitos bem, mas erra a
+// conversão estruturada (ex: "01/06/2026" virando "2026-01-01") e às vezes trunca
+// o ano ("11/06"). fallbackYear (o ano auditado) só é usado quando falta o ano.
 function dateTextToIso(dateText, fallbackYear) {
   if (!dateText) return null;
   const t = String(dateText).trim().toLowerCase();
@@ -171,7 +150,7 @@ function dateTextToIso(dateText, fallbackYear) {
     return isoOrNull(year, Number(m[2]), Number(m[1]));
   }
 
-  // formato por extenso: "1 de junho de 2026", "1º de junho 2026"
+  // formato por extenso: "1 de junho de 2026"
   m = /(\d{1,2})\s*(?:º\s*)?de\s+([a-zç]+)(?:\s+de)?\s+(\d{4})/.exec(t);
   if (m) {
     const month = MONTH_NAMES_PT.indexOf(m[2]) + 1;
@@ -179,7 +158,7 @@ function dateTextToIso(dateText, fallbackYear) {
   }
 
   // DD/MM sem ano — o relógio do Windows às vezes é transcrito truncado ("11/06").
-  // Só reparável se soubermos o ano auditado. O separador exclui horas ("11:52").
+  // O separador exclui horas ("11:52").
   if (fallbackYear) {
     m = /(?:^|\D)(\d{1,2})\s*[\/\-.]\s*(\d{1,2})(?!\s*[\/\-.]\s*\d)/.exec(t);
     if (m) return isoOrNull(fallbackYear, Number(m[2]), Number(m[1]));
@@ -187,35 +166,22 @@ function dateTextToIso(dateText, fallbackYear) {
   return null;
 }
 
-// A prioridade de evidências é aplicada AQUI, em código, e não pelo modelo:
-// o relógio do sistema vence sempre que existir; a data de matéria é fallback.
-// Quando o relógio existe mas não é conversível, NÃO caímos na data da matéria: ela
-// costuma ser de notícia antiga ainda na página, e produziria um dia verde errado.
-// Preferimos marcar a página para revisão humana (date_found null + date_warning).
-function normalizePrintDates(parsed, period) {
+// Prioridade aplicada em código, não pelo modelo: o relógio vence sempre que existir.
+// Quando o relógio existe mas não é conversível, NÃO caímos na data da matéria — ela
+// costuma ser de notícia antiga e produziria um dia verde errado.
+function resolveDate(parsed, period) {
   const fallbackYear = period ? period.year : null;
-  parsed.prints.forEach((print) => {
-    const fromClock = dateTextToIso(print.clock_date_text, fallbackYear);
-    if (fromClock) {
-      print.date_found = fromClock;
-      print.date_source = 'relógio do sistema';
-      return;
-    }
-    if (print.clock_date_text) {
-      print.date_found = null;
-      print.date_warning = `relógio do sistema detectado ("${print.clock_date_text}") mas ilegível/incompleto`;
-      return;
-    }
-    const fromArticle = dateTextToIso(print.article_date_text, fallbackYear);
-    if (fromArticle) {
-      print.date_found = fromArticle;
-      print.date_source = 'data da matéria';
-      return;
-    }
-    print.date_found = dateTextToIso(print.date_text, fallbackYear) || null;
-    if (print.date_found) print.date_source = 'data no print';
-  });
-  return parsed;
+  const fromClock = dateTextToIso(parsed.clock_date_text, fallbackYear);
+  if (fromClock) return { date_found: fromClock, date_source: 'relógio do sistema' };
+  if (parsed.clock_date_text) {
+    return {
+      date_found: null,
+      date_warning: `relógio do sistema detectado ("${parsed.clock_date_text}") mas ilegível/incompleto`
+    };
+  }
+  const fromArticle = dateTextToIso(parsed.article_date_text, fallbackYear);
+  if (fromArticle) return { date_found: fromArticle, date_source: 'data da matéria' };
+  return { date_found: null };
 }
 
 async function callAnthropic(apiKey, body) {
@@ -261,9 +227,8 @@ async function callAnthropicWithRetry(apiKey, body, startedAt) {
         await sleep(wait);
         continue;
       }
-      // Espera longa demais (ou orçamento de tempo da função já quase esgotado): não vale a
-      // pena tentar de novo aqui dentro. Falha rápido e devolve quanto esperar para o cliente
-      // decidir — evita a função ser matada por timeout (maxDuration:30 no vercel.json).
+      // Espera longa demais (ou orçamento de tempo da função já quase esgotado): falha
+      // rápido e devolve quanto esperar, para o cliente decidir — evita o timeout da função.
       throw new RateLimitedError(`Falha temporária da Anthropic (status ${res.status}).`, wait);
     }
 
@@ -289,27 +254,32 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const { refs, pageImage, period } = req.body || {};
-  if (!Array.isArray(refs) || refs.length === 0 || !pageImage || !pageImage.base64 || !pageImage.mediaType) {
-    res.status(400).json({ error: 'invalid_request', message: 'refs (array não vazio) e pageImage são obrigatórios.' });
+  const { pageImage, period } = req.body || {};
+  if (!pageImage || !pageImage.base64 || !pageImage.mediaType) {
+    res.status(400).json({ error: 'invalid_request', message: 'pageImage é obrigatório.' });
     return;
   }
 
-  // period é opcional; só é usado se vier bem formado
   const validPeriod =
     period && Number.isInteger(period.month) && period.month >= 1 && period.month <= 12 &&
     Number.isInteger(period.year) && period.year >= 2000 && period.year <= 2100
       ? period
       : null;
 
-  const body = buildRequestBody(refs, pageImage, validPeriod);
+  const body = buildRequestBody(pageImage, validPeriod);
 
   try {
     const upstreamRes = await callAnthropicWithRetry(apiKey, body, startedAt);
     const data = await upstreamRes.json();
     const rawText = (data.content || []).map((block) => block.text || '').join('');
-    const parsed = normalizePrintDates(parseModelJson(rawText), validPeriod);
-    res.status(200).json(parsed);
+    const parsed = parseModelJson(rawText);
+    const resolved = resolveDate(parsed, validPeriod);
+    res.status(200).json({
+      clock_date_text: parsed.clock_date_text || null,
+      article_date_text: parsed.article_date_text || null,
+      notes: parsed.notes || '',
+      ...resolved
+    });
   } catch (err) {
     if (err instanceof UpstreamAuthError) {
       res.status(401).json({ error: 'invalid_api_key', message: err.message });

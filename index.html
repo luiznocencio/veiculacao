@@ -535,7 +535,7 @@
     <div class="run-row">
       <button class="btn btn-primary" id="runBtn">Analisar veiculação</button>
       <div class="progress-wrap" id="progressWrap">
-        <div class="progress-label" id="progressLabel">0 / 0 prints analisados</div>
+        <div class="progress-label" id="progressLabel">0 / 0 páginas analisadas</div>
         <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
       </div>
     </div>
@@ -578,7 +578,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     }
   }
 
-  const MAX_TASK_RETRIES = 4; // reenfileiramentos por página antes de desistir de vez
   const rateLimitGate = { cooldownUntil: 0 };
 
   function sleep(ms) {
@@ -843,45 +842,322 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   }
 
   // ---------- PDF rendering ----------
-  // Lado maior mira 1568px: acima disso a Anthropic redimensiona a imagem de volta,
-  // e abaixo disso datas pequenas (relógio de barra de tarefas, bylines de matérias)
-  // ficam borradas demais para leitura confiável do ano.
-  const TARGET_LONG_EDGE = 1568;
-  const MAX_RENDER_SCALE = 2.6;
+  // Render local em alta resolução. O teto de 1568px é da API, não do navegador:
+  // o casamento de template e o OCR rodam aqui, então usam a página inteira nítida.
+  const LOCAL_ANALYSIS_LONG_EDGE = 2600;
+  const API_LONG_EDGE = 1568; // só para o fallback de IA
+  const MAX_RENDER_SCALE = 4;
   const PAGE_JPEG_QUALITY = 0.9;
 
-  async function renderPdfPages(fileEntry) {
-    const buf = await fileEntry.file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    const pages = [];
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const baseViewport = page.getViewport({ scale: 1 });
-      const longEdge = Math.max(baseViewport.width, baseViewport.height);
-      const scale = Math.min(TARGET_LONG_EDGE / longEdge, MAX_RENDER_SCALE);
-      const viewport = page.getViewport({ scale });
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const ctx = canvas.getContext('2d');
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      const dataUrl = canvas.toDataURL('image/jpeg', PAGE_JPEG_QUALITY);
-      const base64 = dataUrl.split(',')[1];
-      pages.push({ pageNumber: i, base64, mediaType: 'image/jpeg' });
-      canvas.width = 0;
-      canvas.height = 0;
-    }
-    return pages;
+  async function renderPdfPage(pdf, pageNumber) {
+    const page = await pdf.getPage(pageNumber);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const longEdge = Math.max(baseViewport.width, baseViewport.height);
+    const scale = Math.min(LOCAL_ANALYSIS_LONG_EDGE / longEdge, MAX_RENDER_SCALE);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    return canvas;
   }
 
-  // ---------- Analysis via serverless proxy (esconde a chave da OpenAI no servidor) ----------
-  async function analyzePage(pageImage, refs) {
+  function releaseCanvas(canvas) {
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+
+  function canvasToApiImage(canvas) {
+    const longEdge = Math.max(canvas.width, canvas.height);
+    const scale = Math.min(1, API_LONG_EDGE / longEdge);
+    const w = Math.round(canvas.width * scale);
+    const h = Math.round(canvas.height * scale);
+    const out = document.createElement('canvas');
+    out.width = w;
+    out.height = h;
+    out.getContext('2d').drawImage(canvas, 0, 0, w, h);
+    const base64 = out.toDataURL('image/jpeg', PAGE_JPEG_QUALITY).split(',')[1];
+    releaseCanvas(out);
+    return { base64, mediaType: 'image/jpeg' };
+  }
+
+  // ---------- Detecção de banner: casamento de template (determinístico) ----------
+  // Correlação cruzada normalizada (ZNCC) sobre os três canais RGB, em duas etapas:
+  // busca grosseira barata para achar o pico, refino em alta resolução ao redor dele.
+  // Parâmetros calibrados contra controles reais: positivos ficaram em 0,90–0,93 e
+  // negativos (páginas do mesmo portal, sem o banner) em no máximo 0,78.
+  const BANNER_MATCH_THRESHOLD = 0.85;
+  const COARSE_W = 300, COARSE_DW = 16;
+  const FINE_W = 1600, FINE_DW = 64;
+
+  function imageDataOf(source, w, h) {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(source, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h);
+    releaseCanvas(c);
+    return data;
+  }
+
+  // Reamostra a janela (x,y,ww,wh) da imagem num descritor DW x DH x RGB.
+  function descriptor(img, x, y, ww, wh, DW, DH, out) {
+    const { data, width, height } = img;
+    let k = 0;
+    for (let j = 0; j < DH; j++) {
+      let sy = y + (((j + 0.5) * wh / DH) | 0);
+      if (sy < 0) sy = 0; else if (sy >= height) sy = height - 1;
+      const row = sy * width;
+      for (let i = 0; i < DW; i++) {
+        let sx = x + (((i + 0.5) * ww / DW) | 0);
+        if (sx < 0) sx = 0; else if (sx >= width) sx = width - 1;
+        const si = (row + sx) * 4;
+        out[k++] = data[si];
+        out[k++] = data[si + 1];
+        out[k++] = data[si + 2];
+      }
+    }
+    return k;
+  }
+
+  function meanNorm(v, n) {
+    let s = 0, s2 = 0;
+    for (let k = 0; k < n; k++) { s += v[k]; s2 += v[k] * v[k]; }
+    const mean = s / n;
+    const variance = s2 - n * mean * mean;
+    return [mean, variance < 1e-9 ? 0 : Math.sqrt(variance)];
+  }
+
+  function zncc(tvec, tmean, tnorm, wvec, n) {
+    if (tnorm === 0) return -1;
+    const [wmean, wnorm] = meanNorm(wvec, n);
+    if (wnorm === 0) return -1;
+    let cross = 0;
+    for (let k = 0; k < n; k++) cross += (wvec[k] - wmean) * (tvec[k] - tmean);
+    return cross / (wnorm * tnorm);
+  }
+
+  function templateVector(refEl, DW, DH) {
+    const td = imageDataOf(refEl, DW, DH);
+    const v = new Float64Array(DW * DH * 3);
+    let k = 0;
+    for (let j = 0; j < DH; j++) {
+      for (let i = 0; i < DW; i++) {
+        const si = (j * DW + i) * 4;
+        v[k++] = td.data[si];
+        v[k++] = td.data[si + 1];
+        v[k++] = td.data[si + 2];
+      }
+    }
+    const [mean, norm] = meanNorm(v, v.length);
+    return { v, mean, norm };
+  }
+
+  function matchSingleRef(coarse, fine, refEl) {
+    const aspect = refEl.naturalWidth / refEl.naturalHeight;
+
+    const CDH = Math.max(8, Math.round(COARSE_DW / aspect));
+    const FDH0 = Math.max(10, Math.round(FINE_DW / aspect));
+    // banners verticais (aspecto < 1) geram descritores altos — dimensionar pelo maior
+    const scratch = new Float64Array(Math.max(COARSE_DW * CDH, FINE_DW * FDH0) * 3);
+
+    const tC = templateVector(refEl, COARSE_DW, CDH);
+    const nC = COARSE_DW * CDH * 3;
+
+    let best = -1, bx = 0, by = 0, bw = 0;
+    for (let r = 0.06; r <= 0.70; r *= 1.12) {
+      const ww = Math.round(coarse.width * r);
+      const wh = Math.round(ww / aspect);
+      if (ww < 16 || wh < 10 || ww > coarse.width || wh > coarse.height) continue;
+      const step = Math.max(2, (ww / 6) | 0);
+      for (let y = 0; y + wh <= coarse.height; y += step) {
+        for (let x = 0; x + ww <= coarse.width; x += step) {
+          descriptor(coarse, x, y, ww, wh, COARSE_DW, CDH, scratch);
+          const s = zncc(tC.v, tC.mean, tC.norm, scratch, nC);
+          if (s > best) { best = s; bx = x; by = y; bw = ww; }
+        }
+      }
+    }
+    if (best < 0) return { score: -1 };
+
+    const FDH = FDH0;
+    const tF = templateVector(refEl, FINE_DW, FDH);
+    const nF = FINE_DW * FDH * 3;
+    const f = fine.width / coarse.width;
+    const cx = Math.round(bx * f), cy = Math.round(by * f), cw = Math.round(bw * f);
+
+    let refined = -1, rx = cx, ry = cy, rw = cw;
+    for (let sc = 0.75; sc <= 1.30; sc += 0.05) {
+      const ww = Math.round(cw * sc);
+      const wh = Math.round(ww / aspect);
+      if (ww < 16 || wh < 10 || ww > fine.width || wh > fine.height) continue;
+      for (let y = cy - 36; y <= cy + 36; y += 4) {
+        if (y < 0 || y + wh > fine.height) continue;
+        for (let x = cx - 36; x <= cx + 36; x += 4) {
+          if (x < 0 || x + ww > fine.width) continue;
+          descriptor(fine, x, y, ww, wh, FINE_DW, FDH, scratch);
+          const s = zncc(tF.v, tF.mean, tF.norm, scratch, nF);
+          if (s > refined) { refined = s; rx = x; ry = y; rw = ww; }
+        }
+      }
+    }
+    return { score: refined, x: rx, y: ry, width: rw };
+  }
+
+  async function ensureRefImages() {
+    for (const ref of state.refs) {
+      if (ref.el) continue;
+      ref.el = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`não foi possível carregar a referência "${ref.name}"`));
+        img.src = ref.dataUrl;
+      });
+    }
+  }
+
+  function matchBanner(pageCanvas) {
+    const ch = Math.max(1, Math.round(pageCanvas.height * COARSE_W / pageCanvas.width));
+    const fh = Math.max(1, Math.round(pageCanvas.height * FINE_W / pageCanvas.width));
+    const coarse = imageDataOf(pageCanvas, COARSE_W, ch);
+    const fine = imageDataOf(pageCanvas, FINE_W, fh);
+
+    let best = { score: -1, refName: null };
+    for (const ref of state.refs) {
+      const r = matchSingleRef(coarse, fine, ref.el);
+      if (r.score > best.score) best = { ...r, refName: ref.name };
+    }
+    best.found = best.score >= BANNER_MATCH_THRESHOLD;
+    return best;
+  }
+
+  // ---------- Leitura de data por OCR local (Tesseract.js) ----------
+  const TESSERACT_CDN = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+  const MONTH_NAMES_LC = [
+    'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
+    'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'
+  ];
+
+  function isoOrNull(year, month, day) {
+    if (!(day >= 1 && day <= 31) || !(month >= 1 && month <= 12)) return null;
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+
+  // Relógio do Windows: sempre DD/MM/AAAA (ou DD/MM quando a barra está estreita).
+  // Só barra como separador — assim CNPJ ("54.488.977/0001-29") nunca vira data.
+  function parseClockDate(text, fallbackYear) {
+    let m = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/.exec(text);
+    if (m) return isoOrNull(Number(m[3]), Number(m[2]), Number(m[1]));
+    m = /\b(\d{1,2})\/(\d{1,2})\b/.exec(text);
+    if (m && fallbackYear) return isoOrNull(fallbackYear, Number(m[2]), Number(m[1]));
+    return null;
+  }
+
+  // Data no caminho da URL: .../2026/06/02/...
+  function parseUrlDates(text) {
+    const out = [];
+    const re = /\/(\d{4})\/(\d{2})\/(\d{2})(?:\/|\b)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const iso = isoOrNull(Number(m[1]), Number(m[2]), Number(m[3]));
+      if (iso) out.push(iso);
+    }
+    return out;
+  }
+
+  // Byline de matéria: "3 de junho de 2026". Exigir o mês POR EXTENSO é o que
+  // descarta a data de emissão do timbrado ("08 DE JUL DE 2026"), sem heurística.
+  function parseArticleDates(text) {
+    const out = [];
+    const re = new RegExp(`\\b(\\d{1,2})\\s*(?:º)?\\s*de\\s+(${MONTH_NAMES_LC.join('|')})\\s+de\\s+(\\d{4})\\b`, 'gi');
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const month = MONTH_NAMES_LC.indexOf(m[2].toLowerCase()) + 1;
+      const iso = isoOrNull(Number(m[3]), month, Number(m[1]));
+      if (iso) out.push(iso);
+    }
+    return out;
+  }
+
+  function loadScriptOnce(src) {
+    if (loadScriptOnce.cache && loadScriptOnce.cache[src]) return loadScriptOnce.cache[src];
+    loadScriptOnce.cache = loadScriptOnce.cache || {};
+    loadScriptOnce.cache[src] = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('não foi possível carregar o motor de OCR'));
+      document.head.appendChild(s);
+    });
+    return loadScriptOnce.cache[src];
+  }
+
+  let ocrWorkerPromise = null;
+  function getOcrWorker() {
+    if (!ocrWorkerPromise) {
+      ocrWorkerPromise = (async () => {
+        await loadScriptOnce(TESSERACT_CDN);
+        return Tesseract.createWorker('por');
+      })();
+    }
+    return ocrWorkerPromise;
+  }
+
+  function cropCanvas(src, x, y, w, h, upscale = 1) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w * upscale));
+    c.height = Math.max(1, Math.round(h * upscale));
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, x, y, w, h, 0, 0, c.width, c.height);
+    return c;
+  }
+
+  async function ocrOf(canvas) {
+    const worker = await getOcrWorker();
+    const { data } = await worker.recognize(canvas);
+    return data.text || '';
+  }
+
+  // Mesma hierarquia de antes, agora aplicada sobre texto reconhecido localmente:
+  // relógio do sistema vence; sem ele, a data de matéria mais recente.
+  async function readDateLocally(pageCanvas) {
+    const W = pageCanvas.width, H = pageCanvas.height;
+    const year = state.year;
+
+    const clockCrop = cropCanvas(pageCanvas, Math.round(W * 0.60), Math.round(H * 0.90),
+                                 Math.round(W * 0.40), Math.round(H * 0.10), 2);
+    const clockIso = parseClockDate(await ocrOf(clockCrop), year);
+    releaseCanvas(clockCrop);
+    if (clockIso) return { iso: clockIso, source: 'relógio do sistema (OCR)' };
+
+    const urlCrop = cropCanvas(pageCanvas, Math.round(W * 0.05), 0,
+                               Math.round(W * 0.75), Math.round(H * 0.08), 2);
+    const urlDates = parseUrlDates(await ocrOf(urlCrop));
+    releaseCanvas(urlCrop);
+    if (urlDates.length) {
+      return { iso: urlDates.sort().pop(), source: 'data da matéria na URL (OCR)' };
+    }
+
+    const bodyCrop = cropCanvas(pageCanvas, 0, 0, W, H, Math.min(1, 1600 / W));
+    const articleDates = parseArticleDates(await ocrOf(bodyCrop));
+    releaseCanvas(bodyCrop);
+    if (articleDates.length) {
+      return { iso: articleDates.sort().pop(), source: 'data da matéria (OCR)' };
+    }
+    return null;
+  }
+
+  // ---------- Fallback de IA: só leitura de data, quando o OCR não encontra ----------
+  async function analyzePageWithAi(pageCanvas) {
+    const pageImage = canvasToApiImage(pageCanvas);
     const res = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        refs: refs.map((r) => ({ base64: r.base64, mediaType: r.mediaType })),
-        pageImage: { base64: pageImage.base64, mediaType: pageImage.mediaType },
+        pageImage,
         period: { month: state.month + 1, year: state.year }
       })
     });
@@ -892,7 +1168,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     }
     if (res.status === 429) {
       const body = await res.json().catch(() => ({}));
-      throw new RateLimitError(body.message || 'Limite de taxa da OpenAI atingido.', body.retryAfterMs);
+      throw new RateLimitError(body.message || 'Limite de taxa da API atingido.', body.retryAfterMs);
     }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -901,30 +1177,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     return res.json();
   }
 
-  // ---------- Day status resolution ----------
-  const SEVERITY = { missing: 3, problem: 2, ok: 1, pending: 0 };
-
-  function resolveDayStatus(existingStatus, newStatus) {
-    if (!existingStatus) return newStatus;
-    return SEVERITY[newStatus] > SEVERITY[existingStatus] ? newStatus : existingStatus;
-  }
-
-  // ---------- Concurrency pool ----------
-  async function processQueue(tasks, concurrency, workerFn) {
-    let cursor = 0;
-    async function worker() {
-      while (cursor < tasks.length) {
-        const idx = cursor++;
-        await workerFn(tasks[idx], idx);
-      }
-    }
-    await Promise.all(Array.from({ length: concurrency }, worker));
-  }
-
   // ---------- Progress ----------
   function updateProgressBar() {
     const { done, total } = state.progress;
-    el.progressLabel.textContent = `${done} / ${total} prints analisados`;
+    el.progressLabel.textContent = `${done} / ${total} páginas analisadas`;
     el.progressFill.style.width = total > 0 ? `${(done / total) * 100}%` : '0%';
   }
 
@@ -1012,89 +1268,118 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     renderAllSiteCards();
 
     try {
-      const tasks = [];
-      const pagesRemaining = new Array(state.pdfs.length).fill(0);
+      await ensureRefImages();
+
+      // Abrir os PDFs só para contar páginas — o render acontece uma por vez, adiante,
+      // porque um canvas de 2600px por página estouraria a memória com 20 PDFs.
+      const docs = [];
       for (let siteIndex = 0; siteIndex < state.pdfs.length; siteIndex++) {
         try {
-          const pages = await renderPdfPages(state.pdfs[siteIndex]);
-          pages.forEach((pageImage) => tasks.push({ siteIndex, pageImage }));
-          pagesRemaining[siteIndex] = pages.length;
+          const buf = await state.pdfs[siteIndex].file.arrayBuffer();
+          docs[siteIndex] = await pdfjsLib.getDocument({ data: buf }).promise;
         } catch (err) {
           state.results[siteIndex].extraNotes.push(`Falha ao ler o PDF: ${err.message}`);
-          pagesRemaining[siteIndex] = 0;
+          state.results[siteIndex].complete = true;
+          docs[siteIndex] = null;
         }
       }
-      state.results.forEach((result, idx) => {
-        if (pagesRemaining[idx] === 0) result.complete = true;
-      });
 
-      state.progress = { done: 0, total: tasks.length };
+      state.progress = { done: 0, total: docs.reduce((n, d) => n + (d ? d.numPages : 0), 0) };
       updateProgressBar();
       renderAllSiteCards();
 
       let stoppedForApiKey = false;
 
-      await processQueue(tasks, 4, async (task) => {
-        if (stoppedForApiKey) return;
-        await waitForCooldown();
-
-        const { siteIndex, pageImage } = task;
+      for (let siteIndex = 0; siteIndex < docs.length && !stoppedForApiKey; siteIndex++) {
+        const pdf = docs[siteIndex];
+        if (!pdf) continue;
         const siteResult = state.results[siteIndex];
-        let requeued = false;
-        try {
-          const analysis = await analyzePage(pageImage, state.refs);
-          if (analysis.prints.length === 0) {
-            siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: nenhum print reconhecível encontrado.`);
-          }
-          analysis.prints.forEach((print) => {
-            const day = parseIsoDateInMonth(print.date_found, state.month, state.year);
+        const readings = []; // { page, iso } — para checar a ordem cronológica depois
+
+        for (let pageNumber = 1; pageNumber <= pdf.numPages && !stoppedForApiKey; pageNumber++) {
+          let canvas = null;
+          try {
+            canvas = await renderPdfPage(pdf, pageNumber);
+
+            const match = matchBanner(canvas);
+            const scoreTxt = match.score >= 0 ? match.score.toFixed(2) : '—';
+
+            let date = await readDateLocally(canvas);
+            let aiWarning = null;
+            if (!date) {
+              await waitForCooldown();
+              const ai = await analyzePageWithAi(canvas);
+              if (ai.date_found) date = { iso: ai.date_found, source: `${ai.date_source || 'IA'} (IA)` };
+              else aiWarning = ai.date_warning || null;
+            }
+
+            if (!date) {
+              const why = aiWarning ? ` (${aiWarning})` : '';
+              siteResult.extraNotes.push(`Página ${pageNumber}: nenhuma data legível encontrada, nem por OCR nem pela IA${why}.`);
+              continue;
+            }
+
+            const day = parseIsoDateInMonth(date.iso, state.month, state.year);
             if (day === null) {
-              let dateInfo;
-              if (print.date_found) {
-                dateInfo = `data extraída (${print.date_found}) fora do mês/ano selecionado`;
-              } else if (print.date_warning) {
-                dateInfo = print.date_warning;
-              } else {
-                dateInfo = 'nenhuma data legível encontrada no print';
-              }
-              siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: ${dateInfo}. ${print.notes || ''}`.trim());
-              return;
+              siteResult.extraNotes.push(`Página ${pageNumber}: data extraída (${date.iso}) fora do mês/ano selecionado. Origem: ${date.source}.`);
+              continue;
             }
-            const newStatus = print.banner_found ? 'ok' : 'problem';
+
+            readings.push({ page: pageNumber, iso: date.iso });
+
+            const notes = `Banner ${match.found ? 'encontrado' : 'NÃO encontrado'} (similaridade ${scoreTxt}). Data pela ${date.source}.`;
             const existing = siteResult.days.get(day);
-            if (existing && existing.page !== pageImage.pageNumber) {
-              siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: dia ${day} também já foi comprovado pela página ${existing.page} — confira se alguma das datas foi lida errada.`);
+            if (existing && existing.page !== pageNumber) {
+              // Duplicidade não depende da ordem das páginas: é sempre ambígua.
+              siteResult.extraNotes.push(`Dia ${day} reivindicado pelas páginas ${existing.page} e ${pageNumber} — ambas marcadas para revisão.`);
+              siteResult.days.set(day, {
+                status: 'problem',
+                notes: `Dia ambíguo: páginas ${existing.page} e ${pageNumber} leram a mesma data.`,
+                page: existing.page
+              });
+              continue;
             }
-            const resolvedStatus = resolveDayStatus(existing ? existing.status : null, newStatus);
-            siteResult.days.set(day, { status: resolvedStatus, notes: print.notes || '', page: pageImage.pageNumber });
-          });
-        } catch (err) {
-          if (err instanceof ApiKeyError) {
-            stoppedForApiKey = true;
-            showApiErrorBanner(err.message);
-          } else if (err instanceof RateLimitError) {
-            noteRateLimited(err.retryAfterMs);
-            const attempts = (task.attempts || 0) + 1;
-            if (attempts <= MAX_TASK_RETRIES) {
-              tasks.push({ siteIndex, pageImage, attempts });
-              state.progress.total++;
-              requeued = true;
+
+            siteResult.days.set(day, {
+              status: match.found ? 'ok' : 'problem',
+              notes,
+              page: pageNumber
+            });
+          } catch (err) {
+            if (err instanceof ApiKeyError) {
+              stoppedForApiKey = true;
+              showApiErrorBanner(err.message);
+            } else if (err instanceof RateLimitError) {
+              noteRateLimited(err.retryAfterMs);
+              siteResult.extraNotes.push(`Página ${pageNumber}: limite de taxa da API — página não analisada.`);
             } else {
-              siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: limite de taxa da API persistente após ${attempts} tentativas.`);
+              siteResult.extraNotes.push(`Página ${pageNumber}: ${err.message}`);
             }
-          } else {
-            siteResult.extraNotes.push(`Página ${pageImage.pageNumber}: ${err.message}`);
+          } finally {
+            if (canvas) releaseCanvas(canvas);
+            state.progress.done++;
+            updateProgressBar();
+            renderAllSiteCards();
+            await sleep(0); // devolve o controle ao navegador: o matching e o OCR são pesados
           }
-        } finally {
-          if (!requeued) {
-            pagesRemaining[siteIndex]--;
-            if (pagesRemaining[siteIndex] === 0) siteResult.complete = true;
-          }
-          state.progress.done++;
-          updateProgressBar();
-          renderAllSiteCards();
         }
-      });
+
+        // A ordem cronológica é o padrão, mas não é garantida (o cliente pode trocar as
+        // páginas). Por isso: aviso, nunca correção automática.
+        const outOfOrder = readings.some((r, i) => i > 0 && r.iso < readings[i - 1].iso);
+        if (outOfOrder) {
+          siteResult.extraNotes.push('As datas lidas não estão em ordem crescente entre as páginas. Isso pode ser só a ordem do PDF, ou uma data lida errada — vale conferir.');
+        }
+        // Um site inteiro sem nenhum banner reconhecido quase sempre significa que a arte
+        // daquela criação (ex: versão mobile) não foi enviada — não que o site não veiculou.
+        const anyBanner = [...siteResult.days.values()].some((d) => d.status === 'ok');
+        if (!anyBanner && siteResult.days.size > 0) {
+          siteResult.extraNotes.push('Nenhum banner reconhecido em nenhuma página deste site. Confira se você enviou a arte exata usada por ele — cada variante da criação (desktop, mobile) precisa ser adicionada como imagem de referência.');
+        }
+
+        siteResult.complete = true;
+        renderAllSiteCards();
+      }
 
       // Sem isto, um dia vermelho não tem explicação alguma no log: ou o PDF nunca
       // trouxe aquele dia, ou a data do print correspondente foi lida errada.
