@@ -620,6 +620,58 @@
     cursor: pointer;
   }
   .lightbox-close:hover { background: rgba(0, 0, 0, 0.75); }
+
+  /* Galeria: todos os prints do PDF, contorno na cor do status. */
+  .gallery-wrap { margin-top: var(--space-xlarge); }
+  .gallery-title {
+    display: block;
+    font-size: var(--text-label-md);
+    color: var(--text-muted);
+    font-weight: var(--fw-semibold);
+    margin-bottom: var(--space-xsmall);
+  }
+  .gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(116px, 1fr));
+    gap: var(--space-xsmall);
+  }
+  .gallery-item {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    border: 2px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--surface-sunken);
+    cursor: pointer;
+    overflow: hidden;
+    font-family: inherit;
+    transition: box-shadow var(--duration-fast) var(--ease-standard);
+  }
+  .gallery-item img {
+    width: 100%;
+    height: 88px;
+    object-fit: cover;
+    object-position: top;
+    display: block;
+  }
+  .gallery-tag {
+    font-size: var(--text-label-sm);
+    color: var(--text-default);
+    padding: var(--space-quark) var(--space-xsmall);
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .gallery-item.ok { border-color: var(--color-success); }
+  .gallery-item.review { border-color: var(--color-warning); }
+  .gallery-item.rejected { border-color: var(--color-danger); }
+  .gallery-item:hover { box-shadow: var(--focus-ring); }
+  .gallery-item.reviewed .gallery-tag::after { content: " ✓"; color: var(--color-brand); font-weight: var(--fw-semibold); }
+
+  /* Seletor de dia no modal: compacto, sobre o estilo global de select. */
+  .day-select { height: var(--control-sm); width: auto; min-width: 150px; }
 </style>
 </head>
 <body>
@@ -1377,34 +1429,73 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     return new Date(state.year, state.month + 1, 0).getDate();
   }
 
+  // Agrupa os prints por dia atribuído. Retorna Map<dia, [{ r: reading, idx }]>, onde idx
+  // é a posição do reading na lista única (usada para abrir o modal). Prints sem dia ficam
+  // de fora do mapa — aparecem só na galeria, marcados como "sem dia".
+  function groupReadingsByDay(siteResult) {
+    const m = new Map();
+    siteResult.readings.forEach((r, idx) => {
+      if (r.day == null) return;
+      if (!m.has(r.day)) m.set(r.day, []);
+      m.get(r.day).push({ r, idx });
+    });
+    return m;
+  }
+
+  // Status de um dia a partir dos prints atribuídos a ele. Um dia com vários prints é
+  // ambíguo (amarelo), MENOS quando o auditor já resolveu: exatamente um aprovado/ok e os
+  // demais reprovados → verde. Assim reprovar os errados "limpa" a duplicidade.
+  function dayStatusFrom(readings) {
+    if (readings.length === 1) return displayedStatus(readings[0]);
+    const eff = readings.map(displayedStatus);
+    const oks = eff.filter((s) => s === 'ok').length;
+    const rejected = eff.filter((s) => s === 'rejected').length;
+    if (oks === 1 && rejected === readings.length - 1) return 'ok';
+    return 'review';
+  }
+
   function createSiteCard(siteResult, siteIndex) {
     const totalDays = daysInSelectedMonth();
     const counts = { ok: 0, review: 0, red: 0 };
     const cells = [];
+    const byDay = groupReadingsByDay(siteResult);
 
     for (let day = 1; day <= totalDays; day++) {
-      const info = siteResult.days.get(day);
-      const status = info ? displayedStatus(info) : (siteResult.complete ? 'missing' : 'pending');
+      const group = byDay.get(day); // [{ r, idx }] ou undefined
+      let status, dataAttr = '', clickableCls = '', reviewedCls = '', titleTxt;
+      if (!group) {
+        status = siteResult.complete ? 'missing' : 'pending';
+        titleTxt = `Dia ${day}: nenhum print atribuído.`;
+      } else {
+        const rs = group.map((g) => g.r);
+        status = dayStatusFrom(rs);
+        clickableCls = ' clickable';
+        reviewedCls = rs.some((r) => r.override) ? ' reviewed' : '';
+        dataAttr = ` data-site-index="${siteIndex}" data-reading-index="${group[0].idx}"`;
+        const dup = group.length > 1 ? ` — ${group.length} prints (págs. ${group.map((g) => g.r.page).join(', ')})` : '';
+        titleTxt = `Dia ${day}: ${group[0].r.reason || 'clique para revisar'}${dup}`;
+      }
       if (status === 'ok') counts.ok++;
       else if (status === 'review') counts.review++;
       else if (status === 'missing' || status === 'rejected') counts.red++;
 
-      const reviewedCls = info && info.override ? ' reviewed' : '';
-      const clickableCls = info ? ' clickable' : '';
-      const titleTxt = info
-        ? `Dia ${day}: ${info.reason || 'clique para revisar'}${info.override ? ' — revisado manualmente' : ''}`
-        : `Dia ${day}: nenhum print encontrado.`;
-      const dataAttr = info ? ` data-site-index="${siteIndex}" data-day="${day}"` : '';
       cells.push(`<div class="day-cell ${status}${clickableCls}${reviewedCls}"${dataAttr} title="${escapeHtml(titleTxt)}">${day}</div>`);
     }
 
-    // Prints que têm banner mas cuja data não deu para ler não podem sumir: ficam
-    // acessíveis para o auditor inspecionar e associar manualmente.
-    const unplacedHtml = siteResult.unplaced.length
-      ? `<div class="notes-log"><strong>Prints sem data legível (${siteResult.unplaced.length})</strong> — clique para inspecionar:
-          <div class="chiplist">${siteResult.unplaced.map((u, i) =>
-            `<button type="button" class="chip" style="cursor:pointer" data-site-index="${siteIndex}" data-unplaced="${i}">página ${u.page}</button>`
-          ).join('')}</div></div>`
+    // Galeria: TODOS os prints do PDF, em ordem de página. É a garantia de que nada some —
+    // cada item mostra o dia atribuído (ou "sem dia") e o contorno na cor do status.
+    const galleryHtml = siteResult.readings.length
+      ? `<div class="gallery-wrap">
+          <strong class="gallery-title">Todos os prints (${siteResult.readings.length}) — clique para ver, ampliar e validar</strong>
+          <div class="gallery">${siteResult.readings.map((r, idx) => {
+            const st = displayedStatus(r);
+            const dayTag = r.day != null ? `dia ${r.day}` : 'sem dia';
+            return `<button type="button" class="gallery-item ${st}${r.override ? ' reviewed' : ''}" data-site-index="${siteIndex}" data-reading-index="${idx}" title="Página ${r.page} — ${escapeHtml(r.reason || '')}">
+                      <img src="${r.thumb}" alt="Página ${r.page}" loading="lazy">
+                      <span class="gallery-tag">pág ${r.page} · ${dayTag}</span>
+                    </button>`;
+          }).join('')}</div>
+        </div>`
       : '';
 
     const notesHtml = siteResult.extraNotes.length
@@ -1416,7 +1507,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         <div class="site-card-header">
           <div>
             <div class="site-card-title">${escapeHtml(siteResult.siteName)}</div>
-            <div class="site-card-sub">${totalDays} dias no mês selecionado · clique numa célula para revisar</div>
+            <div class="site-card-sub">${totalDays} dias no mês · clique num dia ou num print para validar</div>
           </div>
           <div class="badges">
             <span class="badge ok">✓ ${counts.ok} ok</span>
@@ -1431,7 +1522,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
           <span><span class="dot" style="background:var(--color-brand)"></span>Revisado por você</span>
         </div>
         <div class="day-grid">${cells.join('')}</div>
-        ${unplacedHtml}
+        ${galleryHtml}
         ${notesHtml}
       </div>
     `;
@@ -1446,12 +1537,12 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
   }
 
   // ---------- Revisão assistida: modal com o print e a decisão manual ----------
-  let reviewCtx = null; // { siteIndex, day } ou { siteIndex, unplaced }
+  let reviewCtx = null; // { siteIndex, readingIndex }
 
   function readingFor(ctx) {
     const site = state.results[ctx.siteIndex];
     if (!site) return null;
-    return ctx.day != null ? site.days.get(ctx.day) : site.unplaced[ctx.unplaced];
+    return site.readings[ctx.readingIndex];
   }
 
   function openReview(ctx) {
@@ -1479,8 +1570,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 
   function renderReviewModal(info) {
     const site = state.results[reviewCtx.siteIndex];
+    const totalDays = daysInSelectedMonth();
     const v = info.verdict || { banner: 'uncertain', confidence: 'medium', reason: '' };
-    const dayLabel = info.day != null ? `Dia ${info.day}` : `Página ${info.page} — sem dia atribuído`;
+    const dayLabel = info.day != null ? `Dia ${info.day}` : `Sem dia — página ${info.page}`;
     const aiTxt = info.aiOpinion
       ? (info.aiOpinion === 'present' ? 'presente' : info.aiOpinion === 'absent' ? 'ausente' : 'incerto')
       : 'não consultada (template já decidiu)';
@@ -1489,24 +1581,15 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
       ? `${escapeHtml(info.dateIso)} <span style="color:var(--text-subtle)">(${escapeHtml(info.dateSource || 'IA')})</span>`
       : `<span style="color:var(--color-warning)">não lida${info.dateWarning ? ' — ' + escapeHtml(info.dateWarning) : ''}</span>`;
 
-    // Só o print que de fato OCUPA o dia é decidível aqui. Um 2º print que disputa o
-    // mesmo dia (duplicidade) é apenas inspecionável — a decisão é na célula do dia.
-    const stored = info.day != null ? site.days.get(info.day) : null;
-    const canDecide = stored === info;
-    let actions;
-    if (canDecide) {
-      actions = `
-      <div class="modal-actions">
-        <button type="button" class="btn approve ${info.override === 'approved' ? 'active-approve' : ''}" data-action="approve">✓ Aprovar (banner ok)</button>
-        <button type="button" class="btn reject ${info.override === 'rejected' ? 'active-reject' : ''}" data-action="reject">✕ Reprovar</button>
-        <button type="button" class="btn" data-action="auto" ${info.override ? '' : 'disabled'}>↺ Automático</button>
-      </div>
-      <div class="modal-hint">${info.override ? 'Decisão manual aplicada — sobrepõe o veredito automático.' : 'Sem decisão manual: vale o veredito automático acima.'}</div>`;
-    } else if (info.day != null) {
-      actions = `<div class="modal-hint">Este print disputa o <strong>dia ${info.day}</strong> com outra página. Resolva a duplicidade abrindo a célula do dia ${info.day} na grade.</div>`;
-    } else {
-      actions = `<div class="modal-hint">Este print não tem data legível, então não foi associado a um dia. Confira no PDF original; se a data pertencer ao mês auditado, considere refazer a análise com a arte de referência correta.</div>`;
-    }
+    // Seletor de dia: a ligação print↔dia é editável à mão. Resolve tanto banner errado
+    // quanto data lida errada — o auditor coloca o print no dia certo (ou tira dele).
+    const dayOptions = ['<option value="">— sem dia —</option>']
+      .concat(Array.from({ length: totalDays }, (_, i) => i + 1).map((d) =>
+        `<option value="${d}"${info.day === d ? ' selected' : ''}>dia ${d}</option>`)).join('');
+
+    const decisionHint = info.day == null
+      ? 'Escolha um dia acima para este print entrar na grade; aprovar/reprovar valem sobre ele.'
+      : (info.override ? 'Decisão manual aplicada — sobrepõe o veredito automático.' : 'Sem decisão manual: vale o veredito automático acima.');
 
     el.reviewModalBox.innerHTML = `
       <div class="modal-head">
@@ -1518,11 +1601,17 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
       </div>
       <img class="modal-thumb" src="${info.thumb}" alt="Print da página ${info.page}" data-action="zoom" title="Clique para ampliar em tela cheia">
       <div class="modal-thumb-hint">🔍 clique na imagem para ampliar</div>
+      <div class="modal-row"><span class="k">Dia do print</span><span class="v"><select class="day-select" data-action="setday">${dayOptions}</select></span></div>
       <div class="modal-row"><span class="k">Banner</span><span class="v"><span class="vpill ${v.banner}">${bannerLabel(v)}</span> &nbsp;${escapeHtml(v.reason || '')}</span></div>
       <div class="modal-row"><span class="k">Template</span><span class="v">similaridade ${scoreTxt} (limiar ${BANNER_MATCH_THRESHOLD})</span></div>
       <div class="modal-row"><span class="k">2ª opinião IA</span><span class="v">${aiTxt}${info.aiBannerNotes ? ' — ' + escapeHtml(info.aiBannerNotes) : ''}</span></div>
-      <div class="modal-row"><span class="k">Data</span><span class="v">${dateTxt}</span></div>
-      ${actions}
+      <div class="modal-row"><span class="k">Data lida</span><span class="v">${dateTxt}</span></div>
+      <div class="modal-actions">
+        <button type="button" class="btn approve ${info.override === 'approved' ? 'active-approve' : ''}" data-action="approve">✓ Aprovar (banner ok)</button>
+        <button type="button" class="btn reject ${info.override === 'rejected' ? 'active-reject' : ''}" data-action="reject">✕ Reprovar</button>
+        <button type="button" class="btn" data-action="auto" ${info.override ? '' : 'disabled'}>↺ Automático</button>
+      </div>
+      <div class="modal-hint">${decisionHint}</div>
     `;
   }
 
@@ -1534,16 +1623,22 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     renderReviewModal(info); // reflete o novo estado sem fechar o modal
   }
 
-  // Clique nas células/chips dos cards abre a revisão.
+  function setReadingDay(value) {
+    const info = readingFor(reviewCtx);
+    if (!info) return;
+    info.day = value === '' ? null : Number(value);
+    renderAllSiteCards();
+    renderReviewModal(info);
+  }
+
+  // Clique numa célula da grade OU num item da galeria abre a revisão daquele print.
   el.results.addEventListener('click', (e) => {
-    const target = e.target.closest('[data-site-index]');
+    const target = e.target.closest('[data-reading-index]');
     if (!target) return;
-    const siteIndex = Number(target.dataset.siteIndex);
-    if (target.dataset.day != null) openReview({ siteIndex, day: Number(target.dataset.day) });
-    else if (target.dataset.unplaced != null) openReview({ siteIndex, unplaced: Number(target.dataset.unplaced) });
+    openReview({ siteIndex: Number(target.dataset.siteIndex), readingIndex: Number(target.dataset.readingIndex) });
   });
 
-  // Ações dentro do modal.
+  // Ações (clique) dentro do modal.
   el.reviewModalBox.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-action]');
     if (!btn) return;
@@ -1553,6 +1648,12 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     else if (action === 'approve') applyOverride('approved');
     else if (action === 'reject') applyOverride('rejected');
     else if (action === 'auto') applyOverride(null);
+  });
+
+  // Troca do dia (evento change do <select>).
+  el.reviewModalBox.addEventListener('change', (e) => {
+    const sel = e.target.closest('select[data-action="setday"]');
+    if (sel) setReadingDay(sel.value);
   });
 
   el.reviewModal.addEventListener('click', (e) => {
@@ -1590,8 +1691,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 
     state.results = state.pdfs.map((pdf) => ({
       siteName: pdf.name,
-      days: new Map(),
-      unplaced: [],
+      readings: [], // lista única de prints; o dia (reading.day) é editável e a grade é derivada
       extraNotes: [],
       complete: false
     }));
@@ -1624,7 +1724,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         const pdf = docs[siteIndex];
         if (!pdf) continue;
         const siteResult = state.results[siteIndex];
-        const readings = []; // { page, iso } — para checar a ordem cronológica depois
 
         // Em série, cada chamada de ~5s à API bloqueia a próxima página. O render e o
         // matching são CPU (não paralelizam em JS), mas a espera da rede sim: com um
@@ -1651,6 +1750,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
               ? { iso: ai.date_found, source: ai.date_source || 'IA' }
               : null;
 
+            // Todo print vira um reading na lista única — nunca some. O dia é derivado da
+            // data lida (ou null), mas fica EDITÁVEL: o auditor corrige na galeria/modal.
             const reading = {
               page: pageNumber,
               thumb,
@@ -1661,43 +1762,26 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
               dateIso: date ? date.iso : null,
               dateSource: date ? date.source : null,
               dateWarning: ai.date_warning || null,
+              day: null,
+              status: baseStatus(verdict),
+              reason: verdict.reason,
               override: null
             };
+            siteResult.readings.push(reading);
 
             if (!date) {
-              // Print existe, mas sem data: não dá para colocá-lo num dia. Fica acessível
-              // na lista "prints sem data legível" para revisão manual — não some.
               const why = ai.date_warning ? ` (${ai.date_warning})` : '';
-              siteResult.unplaced.push(reading);
-              siteResult.extraNotes.push(`Página ${pageNumber}: banner ${bannerLabel(verdict)}, mas data ilegível${why} — não associada a um dia. Veja em "prints sem data legível".`);
+              siteResult.extraNotes.push(`Página ${pageNumber}: banner ${bannerLabel(verdict)}, mas data ilegível${why} — sem dia. Veja na galeria e atribua manualmente.`);
               return;
             }
 
             const day = parseIsoDateInMonth(date.iso, state.month, state.year);
             if (day === null) {
-              siteResult.unplaced.push(reading);
-              siteResult.extraNotes.push(`Página ${pageNumber}: data lida (${date.iso}) fora do mês/ano selecionado. Origem: ${date.source}.`);
+              siteResult.extraNotes.push(`Página ${pageNumber}: data lida (${date.iso}) fora do mês/ano selecionado — sem dia. Atribua manualmente na galeria.`);
               return;
             }
 
             reading.day = day;
-            readings.push({ page: pageNumber, iso: date.iso });
-
-            const existing = siteResult.days.get(day);
-            if (existing && existing.page !== pageNumber) {
-              // Duplicidade não depende da ordem das páginas: é sempre ambígua → revisar.
-              existing.duplicateOf = existing.duplicateOf || [existing.page];
-              existing.duplicateOf.push(pageNumber);
-              existing.status = 'review';
-              existing.reason = `Dia ambíguo: páginas ${existing.duplicateOf.join(', ')} leram esta mesma data.`;
-              siteResult.unplaced.push(reading); // o 2º print também fica inspecionável
-              siteResult.extraNotes.push(`Dia ${day} reivindicado pelas páginas ${existing.duplicateOf.join(' e ')} — marcado para revisão.`);
-              return;
-            }
-
-            reading.status = baseStatus(verdict);
-            reading.reason = verdict.reason;
-            siteResult.days.set(day, reading);
           } catch (err) {
             if (err instanceof ApiKeyError) {
               stoppedForApiKey = true;
@@ -1745,24 +1829,23 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 
         // A ordem cronológica é o padrão, mas não é garantida (o cliente pode trocar as
         // páginas). Por isso: aviso, nunca correção automática.
-        readings.sort((a, b) => a.page - b.page); // as páginas terminam fora de ordem no pool
-        const outOfOrder = readings.some((r, i) => i > 0 && r.iso < readings[i - 1].iso);
+        const placed = siteResult.readings.filter((r) => r.day != null && r.dateIso).sort((a, b) => a.page - b.page);
+        const outOfOrder = placed.some((r, i) => i > 0 && r.dateIso < placed[i - 1].dateIso);
         if (outOfOrder) {
-          siteResult.extraNotes.push('As datas lidas não estão em ordem crescente entre as páginas. Isso pode ser só a ordem do PDF, ou uma data lida errada — vale conferir.');
+          siteResult.extraNotes.push('As datas lidas não estão em ordem crescente entre as páginas. Isso pode ser só a ordem do PDF, ou uma data lida errada — vale conferir na galeria.');
         }
-        // Um dia amarelo não pode ficar sem explicação: nomear cada um e o porquê.
-        const reviewDays = [...siteResult.days.entries()]
-          .filter(([, info]) => info.status === 'review')
-          .sort((a, b) => a[0] - b[0]);
-        reviewDays.forEach(([day, info]) => {
-          siteResult.extraNotes.push(`Dia ${day} (página ${info.page}) — revisar: ${info.reason || 'motivo não registrado'}`);
+
+        // Duplicidades: mais de um print no mesmo dia. Não some nada; o auditor decide.
+        const byDay = groupReadingsByDay(siteResult);
+        [...byDay.entries()].filter(([, g]) => g.length > 1).sort((a, b) => a[0] - b[0]).forEach(([day, g]) => {
+          siteResult.extraNotes.push(`Dia ${day}: ${g.length} prints (páginas ${g.map((x) => x.r.page).join(', ')}) — revise e reprove os que não valem.`);
         });
 
         // Um site inteiro sem nenhum banner reconhecido quase sempre significa que a arte
         // daquela criação (ex: versão mobile) não foi enviada — não que o site não veiculou.
-        const anyBanner = [...siteResult.days.values()].some((d) => d.status === 'ok');
-        if (!anyBanner && siteResult.days.size > 0) {
-          siteResult.extraNotes.push('Nenhum banner reconhecido em nenhuma página deste site. Confira se você enviou a arte exata usada por ele — cada variante da criação (desktop, mobile) precisa ser adicionada como imagem de referência.');
+        const anyBanner = siteResult.readings.some((r) => r.status === 'ok');
+        if (!anyBanner && siteResult.readings.length > 0) {
+          siteResult.extraNotes.push('Nenhum banner reconhecido automaticamente. Confira os prints na galeria e valide manualmente; se faltou a arte exata (ex.: versão mobile), adicione-a como referência.');
         }
 
         siteResult.complete = true;
@@ -1773,12 +1856,13 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
       // trouxe aquele dia, ou a data do print correspondente foi lida errada.
       const totalDays = daysInSelectedMonth();
       state.results.forEach((siteResult) => {
+        const byDay = groupReadingsByDay(siteResult);
         const missing = [];
         for (let d = 1; d <= totalDays; d++) {
-          if (!siteResult.days.has(d)) missing.push(d);
+          if (!byDay.has(d)) missing.push(d);
         }
         if (missing.length) {
-          siteResult.extraNotes.push(`Dias sem nenhum print correspondente: ${missing.join(', ')}. Verifique se o PDF realmente não os cobre ou se a data de algum print foi lida errada.`);
+          siteResult.extraNotes.push(`Dias sem nenhum print atribuído: ${missing.join(', ')}. Confira na galeria se algum print sem dia pertence a eles.`);
         }
       });
       renderAllSiteCards();
