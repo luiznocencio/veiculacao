@@ -161,6 +161,12 @@ function buildRequestBody(pageImage, period, refs, askBanner) {
   return {
     model: MODEL_ID,
     max_tokens: 600,
+    // Ler a data de um print é TRANSCRIÇÃO, não criação: queremos a mesma resposta para a
+    // mesma imagem. Sem isto o default é 1.0 (amostragem), e foi medido em duas rodadas do
+    // mesmo PDF: a página 8 do PI 8769 leu "2025-06-26" numa e "2025-06-05" na outra, e a
+    // página 6 do Prints penedo leu "2026-06-04" e depois "2026-06-06". Dias mudando de
+    // rodada para rodada destroem a confiança na auditoria.
+    temperature: 0,
     // O system prompt se repete em todas as chamadas do lote: marcá-lo como cache evita
     // pagar o custo total de input em cada página. (Cada modo tem sua própria entrada.)
     system: [{ type: 'text', text: buildSystemPrompt(askBanner), cache_control: { type: 'ephemeral' } }],

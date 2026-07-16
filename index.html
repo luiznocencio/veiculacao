@@ -1582,7 +1582,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 
   function buildDiagnosticCsv() {
     const rows = [[
-      'site', 'pagina', 'score_template', 'ia_consultada', 'ia_opiniao', 'ia_notas',
+      'site', 'pagina', 'score_template', 'match_x', 'match_y', 'match_largura', 'arte_usada',
+      'ia_consultada', 'ia_opiniao', 'ia_notas',
       'banner_veredito', 'confianca', 'data_lida', 'data_origem', 'data_aviso',
       'dia_atribuido', 'ano_recuperado', 'status_automatico', 'decisao_manual', 'status_final', 'motivo'
     ]];
@@ -1593,6 +1594,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
           site.siteName,
           r.page,
           r.score >= 0 ? r.score.toFixed(4) : '',
+          r.matchX == null ? '' : r.matchX,
+          r.matchY == null ? '' : r.matchY,
+          r.matchW == null ? '' : r.matchW,
+          r.matchRef || '',
           r.askedBanner ? 'sim' : 'nao',
           r.aiOpinion || '',
           r.aiBannerNotes || '',
@@ -1860,6 +1865,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
               page: pageNumber,
               thumb,
               score: match.score,
+              // Onde o template achou o banner (coordenadas na página reduzida a 1600px de
+              // largura) e qual arte venceu. Sem isto, um score que muda entre rodadas é um
+              // mistério; com isto dá para ver se ele travou noutra região.
+              matchX: match.x, matchY: match.y, matchW: match.width, matchRef: match.refName || '',
               askedBanner: askBanner, // se a IA NÃO foi consultada, o template decidiu sozinho (verde silencioso)
               aiOpinion: ai.banner_opinion || null,
               aiBannerNotes: ai.banner_notes || '',
