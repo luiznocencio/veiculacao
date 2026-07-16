@@ -1838,7 +1838,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
               page: pageNumber,
               thumb,
               score: match.score,
-              askedBanner, // se a IA NÃO foi consultada, o template decidiu sozinho (verde silencioso)
+              askedBanner: askBanner, // se a IA NÃO foi consultada, o template decidiu sozinho (verde silencioso)
               aiOpinion: ai.banner_opinion || null,
               aiBannerNotes: ai.banner_notes || '',
               verdict,
