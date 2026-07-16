@@ -721,6 +721,7 @@
 
     <div class="run-row">
       <button class="btn btn-primary" id="runBtn">Analisar veiculação</button>
+      <button class="btn" id="exportBtn" style="display:none" title="Baixa uma planilha com score do template, opinião da IA e data lida de cada página — para medir onde a ferramenta erra">⬇ Exportar diagnóstico (CSV)</button>
       <div class="progress-wrap" id="progressWrap">
         <div class="progress-label" id="progressLabel">0 / 0 páginas analisadas</div>
         <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
@@ -806,6 +807,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     pdfUploadZone: document.getElementById('pdfUploadZone'),
     pdfLimitStatus: document.getElementById('pdfLimitStatus'),
     runBtn: document.getElementById('runBtn'),
+    exportBtn: document.getElementById('exportBtn'),
     progressWrap: document.getElementById('progressWrap'),
     progressLabel: document.getElementById('progressLabel'),
     progressFill: document.getElementById('progressFill'),
@@ -901,25 +903,42 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     });
   }
 
-  const REF_IMAGE_MAX_DIM = 1024; // reduz custo de tokens de imagem enviados em toda chamada à API
-  const REF_IMAGE_QUALITY = 0.85;
+  const REF_API_MAX_DIM = 1024;   // versão enviada à IA: JPEG, para conter custo de tokens
+  const REF_API_QUALITY = 0.85;
+  const REF_MATCH_MAX_DIM = 1600; // versão do matcher: PNG sem perda
 
-  async function downscaleImage(file) {
-    const img = await loadImageFromFile(file);
-    let { width, height } = img;
-    if (width > REF_IMAGE_MAX_DIM || height > REF_IMAGE_MAX_DIM) {
-      const scale = REF_IMAGE_MAX_DIM / Math.max(width, height);
+  function drawScaled(img, maxDim) {
+    let width = img.naturalWidth || img.width;
+    let height = img.naturalHeight || img.height;
+    if (width > maxDim || height > maxDim) {
+      const scale = maxDim / Math.max(width, height);
       width = Math.round(width * scale);
       height = Math.round(height * scale);
     }
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
-    canvas.getContext('2d').drawImage(img, 0, 0, width, height);
-    const dataUrl = canvas.toDataURL('image/jpeg', REF_IMAGE_QUALITY);
-    canvas.width = 0;
-    canvas.height = 0;
-    return dataUrl;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, width, height);
+    return canvas;
+  }
+
+  // Duas versões da arte, de propósito. O casamento de template é uma correlação de
+  // PIXELS: os artefatos do JPEG (anéis em texto e logotipo) mexem justamente no número
+  // que comparamos com o limiar — positivos reais ficam em 0,90–0,93 contra limiar 0,84,
+  // então centésimos importam. O matcher recebe PNG sem perda; o JPEG existe só para
+  // baratear os tokens da imagem enviada à IA.
+  async function prepareRefImage(file) {
+    const img = await loadImageFromFile(file);
+    const apiCanvas = drawScaled(img, REF_API_MAX_DIM);
+    const apiUrl = apiCanvas.toDataURL('image/jpeg', REF_API_QUALITY);
+    releaseCanvas(apiCanvas);
+    const matchCanvas = drawScaled(img, REF_MATCH_MAX_DIM);
+    const matchUrl = matchCanvas.toDataURL('image/png');
+    releaseCanvas(matchCanvas);
+    return { apiUrl, matchUrl };
   }
 
   async function handleRefUpload(fileList) {
@@ -938,10 +957,12 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         continue;
       }
       try {
-        const dataUrl = await downscaleImage(file);
-        const [, mediaType, base64] = /^data:(.+?);base64,(.*)$/.exec(dataUrl) || [];
+        const { apiUrl, matchUrl } = await prepareRefImage(file);
+        const [, mediaType, base64] = /^data:(.+?);base64,(.*)$/.exec(apiUrl) || [];
         if (!base64) throw new Error('formato de imagem não reconhecido');
-        state.refs.push({ name: file.name, base64, mediaType, dataUrl });
+        // base64/mediaType → IA (JPEG); matchUrl → template matching (PNG sem perda);
+        // dataUrl → miniatura do chip.
+        state.refs.push({ name: file.name, base64, mediaType, dataUrl: apiUrl, matchUrl });
       } catch (err) {
         messages.push(`Falha ao processar "${file.name}": ${err.message}`);
       }
@@ -1318,7 +1339,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
         const img = new Image();
         img.onload = () => resolve(img);
         img.onerror = () => reject(new Error(`não foi possível carregar a referência "${ref.name}"`));
-        img.src = ref.dataUrl;
+        img.src = ref.matchUrl; // PNG sem perda — este é o template do matcher, não o JPEG da IA
       });
     }
   }
@@ -1528,7 +1549,68 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     `;
   }
 
+  // ---------- Export de diagnóstico ----------
+  // Existe para uma coisa só: transformar "errou muito" em dado. Com uma rodada real dá
+  // para ver se os erros são falso-verde ou falso-amarelo, se a distribuição de score dos
+  // presentes se sobrepõe à dos ausentes (se sim, o limiar não tem conserto), e se o
+  // gargalo é o banner ou a data. Sem isso, calibrar é adivinhação.
+  function csvEscape(value) {
+    const s = value == null ? '' : String(value);
+    return /[";\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function buildDiagnosticCsv() {
+    const rows = [[
+      'site', 'pagina', 'score_template', 'ia_consultada', 'ia_opiniao', 'ia_notas',
+      'banner_veredito', 'confianca', 'data_lida', 'data_origem', 'data_aviso',
+      'dia_atribuido', 'status_automatico', 'decisao_manual', 'status_final', 'motivo'
+    ]];
+    state.results.forEach((site) => {
+      site.readings.forEach((r) => {
+        const v = r.verdict || {};
+        rows.push([
+          site.siteName,
+          r.page,
+          r.score >= 0 ? r.score.toFixed(4) : '',
+          r.askedBanner ? 'sim' : 'nao',
+          r.aiOpinion || '',
+          r.aiBannerNotes || '',
+          v.banner || '',
+          v.confidence || '',
+          r.dateIso || '',
+          r.dateSource || '',
+          r.dateWarning || '',
+          r.day == null ? '' : r.day,
+          r.status || '',
+          r.override || '',
+          displayedStatus(r) || '',
+          r.reason || ''
+        ]);
+      });
+    });
+    // Separador ";" + BOM (U+FEFF): é o que o Excel em pt-BR abre com colunas e acentos
+    // corretos. O BOM vai por fromCharCode de propósito — um caractere invisível colado
+    // no código-fonte some sem ninguém ver se algum editor normalizar o arquivo.
+    const bom = String.fromCharCode(0xFEFF);
+    return bom + rows.map((row) => row.map(csvEscape).join(';')).join('\r\n');
+  }
+
+  function exportDiagnostic() {
+    const blob = new Blob([buildDiagnosticCsv()], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `diagnostico-veiculacao-${state.year}-${String(state.month + 1).padStart(2, '0')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  el.exportBtn.addEventListener('click', exportDiagnostic);
+
   function renderAllSiteCards() {
+    el.exportBtn.style.display = state.results.some((s) => s.readings.length) ? '' : 'none';
     if (state.results.length === 0) {
       el.results.innerHTML = '<div class="empty-hint">Os resultados por site aparecerão aqui após a análise.</div>';
       return;
@@ -1756,6 +1838,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
               page: pageNumber,
               thumb,
               score: match.score,
+              askedBanner, // se a IA NÃO foi consultada, o template decidiu sozinho (verde silencioso)
               aiOpinion: ai.banner_opinion || null,
               aiBannerNotes: ai.banner_notes || '',
               verdict,
