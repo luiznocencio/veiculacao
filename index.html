@@ -861,6 +861,27 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     return d;
   }
 
+  // Recupera o dia quando SÓ o ano veio errado. Medido numa rodada real: o modelo lê o
+  // byline e devolve 2008 ou 2025 onde está 2026, com dia e mês corretos — e nós
+  // descartávamos o print inteiro por causa de um dígito (4 de 50 prints perdidos assim,
+  // virando "dia faltando" sem explicação).
+  // Duas travas de propósito: o MÊS nunca é corrigido (trocar mês muda o significado da
+  // prova e merece decisão manual), e o dia recuperado vai para REVISÃO, nunca para verde
+  // — a evidência volta para a mesa do auditor, não para uma aprovação silenciosa.
+  function recoverDayFromWrongYear(isoDate, month, year) {
+    if (!isoDate || typeof isoDate !== 'string') return null;
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+    if (!match) return null;
+    const readYear = Number(match[1]);
+    const readMonth = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    if (readYear === year) return null;   // ano certo: não é este caso
+    if (readMonth !== month) return null; // mês diferente: não mexemos
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    if (day < 1 || day > daysInMonth) return null;
+    return { day, readYear };
+  }
+
   // ---------- Drag and drop ----------
   function setupDropZone(zoneEl, onFiles) {
     ['dragenter', 'dragover'].forEach((evt) => {
@@ -1563,7 +1584,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
     const rows = [[
       'site', 'pagina', 'score_template', 'ia_consultada', 'ia_opiniao', 'ia_notas',
       'banner_veredito', 'confianca', 'data_lida', 'data_origem', 'data_aviso',
-      'dia_atribuido', 'status_automatico', 'decisao_manual', 'status_final', 'motivo'
+      'dia_atribuido', 'ano_recuperado', 'status_automatico', 'decisao_manual', 'status_final', 'motivo'
     ]];
     state.results.forEach((site) => {
       site.readings.forEach((r) => {
@@ -1581,6 +1602,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
           r.dateSource || '',
           r.dateWarning || '',
           r.day == null ? '' : r.day,
+          r.yearRecovered ? 'sim' : 'nao',
           r.status || '',
           r.override || '',
           displayedStatus(r) || '',
@@ -1846,6 +1868,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
               dateSource: date ? date.source : null,
               dateWarning: ai.date_warning || null,
               day: null,
+              yearRecovered: false,
               status: baseStatus(verdict),
               reason: verdict.reason,
               override: null
@@ -1859,12 +1882,22 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
             }
 
             const day = parseIsoDateInMonth(date.iso, state.month, state.year);
-            if (day === null) {
+            const recovered = day === null ? recoverDayFromWrongYear(date.iso, state.month, state.year) : null;
+            const finalDay = day != null ? day : (recovered ? recovered.day : null);
+
+            if (finalDay === null) {
               siteResult.extraNotes.push(`Página ${pageNumber}: data lida (${date.iso}) fora do mês/ano selecionado — sem dia. Atribua manualmente na galeria.`);
               return;
             }
 
-            reading.day = day;
+            reading.day = finalDay;
+            if (recovered) {
+              // Evidência recuperada de um ano mal lido nunca vira verde: vai para revisão.
+              reading.yearRecovered = true;
+              reading.status = 'review';
+              reading.reason = `Ano lido (${recovered.readYear}) fora do período, mas dia e mês batem — dia ${recovered.day} assumido em ${state.year}. Confira o print.`;
+              siteResult.extraNotes.push(`Página ${pageNumber}: ano lido (${recovered.readYear}) fora do período; dia ${recovered.day} atribuído assumindo ${state.year} — confira o print.`);
+            }
           } catch (err) {
             if (err instanceof ApiKeyError) {
               stoppedForApiKey = true;
